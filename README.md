@@ -20,8 +20,8 @@ for new grads joining healthcare IT in the US and Canada.
 <br>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/preview-dark.jpg">
-  <img src=".github/assets/preview-light.jpg" width="760" alt="A week 3 lecture page: an HL7 v2 message and its acknowledgment captured on the wire, with a tested margin note">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/preview-dark.png">
+  <img src=".github/assets/preview-light.png" width="800" alt="The course home page: the navigation bar, the title The Missing Semester of Your Health IT Education, and the course introduction">
 </picture>
 
 </div>
