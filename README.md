@@ -2,7 +2,7 @@
 
 A seven-week, hands-on self-study course for new computer-science graduates heading into healthcare IT in the US and Canada, in the format of MIT's [The Missing Semester of Your CS Education](https://missing.csail.mit.edu/).
 
-**Read it:** https://heyitworked.github.io/health-it-missing-semester/ (or open `index.html` locally; there is no build step).
+**Read it:** https://heyitworked.github.io/health-it-semester/ (or open `index.html` locally; there is no build step).
 
 ## What's inside
 
@@ -28,4 +28,4 @@ This is educational material. It is not legal, compliance or medical advice.
 
 **Fonts:** Source Sans Pro and Source Code Pro, © Adobe, under the SIL Open Font License 1.1 (`static/fonts/OFL.txt`).
 
-Full terms are in [LICENSE](LICENSE) and on the site's [license page](https://heyitworked.github.io/health-it-missing-semester/license.html).
+Full terms are in [LICENSE](LICENSE) and on the site's [license page](https://heyitworked.github.io/health-it-semester/license.html).
