@@ -487,8 +487,8 @@ known sender can connect. Write the choice in the interface spec.</p>
 
 <p>Sometimes data must leave the hospital in reduced form: to a vendor
 debugging an interface, to an analytics team, to a test environment. The
-v3.6 build list asks for allowlist redaction: keep set ID, a salted MRN
-pseudonym, birth year and sex. Here is the logic as tested in v3.6 (python-hl7):</p>
+build list asks for allowlist redaction: keep set ID, a salted MRN
+pseudonym, birth year and sex. Here is the logic as first tested for this course (python-hl7):</p>
 
 <div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">KEEP</span> <span class="o">=</span> <span class="p">{</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">8</span><span class="p">}</span>  <span class="c1"># set ID, MRN, birth date, sex</span>
 <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">msg</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s2">"PID"</span><span class="p">))):</span>
@@ -593,7 +593,7 @@ value into every place a real one could be and checking that it never comes
 out.</p>
 
 <blockquote>
-  <p><strong>Tested:</strong> the v3.6 allowlist logic kept a second
+  <p><strong>Tested:</strong> that allowlist logic kept a second
   <code class="language-plaintext highlighter-rouge">PID-3</code> repetition (an Ontario health card number) and the canary
   caught it; deleting repetitions after the first fixed it.</p>
 </blockquote>
@@ -641,7 +641,7 @@ phone numbers and birth dates are small spaces too. The fix is a keyed hash, HMA
 
 <p>The same MRN gives the same pseudonym under the same key, so linking still
 works. But anyone holding the key can reverse every pseudonym just as fast, so it
-belongs in a secrets manager, never in the repo, a ticket or a prompt. The v3.6
+belongs in a secrets manager, never in the repo, a ticket or a prompt. The original
 comment says <em>salted</em> SHA-256; the “salt” must be a secret key, and HMAC is
 the standard way to key a hash.</p>
 
