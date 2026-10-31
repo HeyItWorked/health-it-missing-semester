@@ -1,0 +1,10 @@
+--- redact.py
++++ redact.py
+@@ -23,6 +23,7 @@
+             msg[f"PID.F{n}"] = ""
+     mrn = str(msg["PID.F3.R1.C1"])
+     msg["PID.F3.R1.C1"] = pseudonym(mrn)  # salted SHA-256
++    del msg.segment("PID")[3][1:]  # first repetition only
+     msg["PID.F7"] = str(msg["PID.F7"])[:4]  # birth year
+     return msg
+ 

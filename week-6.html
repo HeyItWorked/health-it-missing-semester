@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 6 of the Health IT Missing Semester: Ship + get hired.">
+
+  <title>Ship + get hired &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">Ship + get hired</h1>
+<h2 class="subtitle">Week 6 · ~10 h</h2>
+
+<p>Hospitals run 24/7, so how you change things matters as much as what you
+change. An ADT interface that stops at 2 a.m. means the night's admissions never
+reach the lab, pharmacy or bed board, and nurses find out when an order can't be
+placed for a patient the system has never heard of. A change that quietly alters
+what an acknowledgment means can lose messages for days. Most of the work on an
+integration team is keeping existing interfaces running while you change
+them.</p>
+
+<p>This week makes the project something an employer can run, read and trust.
+We put HAPI FHIR, the week 3 bridge and Open Integration Engine (OIE) into one
+Docker Compose file, deploy an OIE channel through its REST API, keep the
+channel's XML in git so every change is a reviewable diff, replay a whole day of
+traffic to prove it creates no duplicate patients, take the bridge down to watch
+the engine queue and an on-call check page, and roll a change back. Then we
+write the documents that turn a lab into a portfolio piece: an interface spec, a
+runbook and a README.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab:
+HAPI FHIR 8.12.0, OIE 4.5.2 and the week 3 bridge on Python 3.12 with
+python-hl7 0.4.5, started by Docker Compose v5.4.0. The outputs are copied from
+one run. Yours will differ in timestamps, control IDs, commit hashes and server
+ids.</p>
+
+<h1 id="one-command-lab">One command to a running lab</h1>
+
+<p>The first thing a reviewer does with your project is try to run it, and the
+commonest way that fails is this week's first watch-out: a README that only works
+on your machine. Your machine has the right Java, an image you pulled months
+ago, a port you opened once. A reviewer's has none of that. So describe the whole
+lab in one file Docker can run anywhere. Messages flow from the sender to OIE on
+port 6661, from OIE to the bridge on 2575, and from the bridge to HAPI over
+HTTP:</p>
+
+<div class="language-yaml highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># Week 6 lab: sender -&gt; OIE (6661) -&gt; bridge (2575) -&gt; HAPI</span>
+<span class="c1"># Images are pinned by digest: "latest" moves, a digest</span>
+<span class="c1"># doesn't. These are HAPI FHIR 8.12.0, OIE 4.5.2 and</span>
+<span class="c1"># Python 3.12-slim as tested on 31 Oct 2026.</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">hapi</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"8080:8080"</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="nt">bridge</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python@sha256:d75c4b6cdd039ae966a34cd3ccab9e0e5f7299280ad76fe1744882d86eedce0b</span>
+<span class="w">    </span><span class="nt">working_dir</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/app</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"./bridge.py:/app/bridge.py:ro"</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">FHIR_BASE</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http://hapi:8080/fhir</span>
+<span class="w">      </span><span class="nt">PIP_DISABLE_PIP_VERSION_CHECK</span><span class="p">:</span><span class="w"> </span><span class="s">"1"</span>
+<span class="w">      </span><span class="nt">PIP_ROOT_USER_ACTION</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ignore</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sh -c "pip install -q hl7==0.4.5 &amp;&amp; python bridge.py"</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"2575:2575"</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">hapi</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">healthcheck</span><span class="p">:</span>
+<span class="w">      </span><span class="c1"># healthy = listening on 2575 AND HAPI answers</span>
+<span class="w">      </span><span class="nt">test</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"CMD"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"python"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-c"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"import</span><span class="nv"> </span><span class="s">socket,</span><span class="nv"> </span><span class="s">urllib.request</span><span class="nv"> </span><span class="s">as</span><span class="nv"> </span><span class="s">u;</span>
+<span class="w">        </span><span class="s">socket.create_connection(('localhost',</span><span class="nv"> </span><span class="s">2575));</span>
+<span class="w">        </span><span class="s">u.urlopen('http://hapi:8080/fhir/metadata')"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5s</span>
+<span class="w">      </span><span class="nt">retries</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">40</span>
+<span class="w">      </span><span class="nt">start_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">180s</span>
+
+<span class="w">  </span><span class="nt">oie</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openintegrationengine/engine@sha256:d48bf93e933f85180f0ae4a94c13f4e5d38bac3ea53468fbb9ee03bbc0d94b14</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"8443:8443"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"6661:6661"</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">depends_on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">bridge</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">healthcheck</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">test</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"CMD"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"curl"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-skf"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-o"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"/dev/null"</span><span class="p p-Indicator">,</span>
+<span class="w">        </span><span class="s">"-u"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"admin:admin"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"-H"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"X-Requested-With:</span><span class="nv"> </span><span class="s">OpenAPI"</span><span class="p p-Indicator">,</span>
+<span class="w">        </span><span class="s">"https://localhost:8443/api/server/version"</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="nt">interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5s</span>
+<span class="w">      </span><span class="nt">retries</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">40</span>
+<span class="w">      </span><span class="nt">start_period</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120s</span>
+</code></pre></div></div>
+
+<p>The images are pinned by <em>digest</em>, not by tag. A tag like
+<code class="language-plaintext highlighter-rouge">latest</code> moves whenever the publisher pushes; a digest names exactly
+one image, so the reviewer runs what you tested, and an upgrade becomes a
+reviewed commit.</p>
+
+<p>The bridge is week 3's <code class="language-plaintext highlighter-rouge">bridge.py</code> with one change: instead of
+hard-coding <code class="language-plaintext highlighter-rouge">http://localhost:8080/fhir</code>, which is wrong inside a
+container, it reads <code class="language-plaintext highlighter-rouge">FHIR_BASE</code> from the environment and falls back
+to the old value. It installs python-hl7 at start-up; a real deployment would
+build an image so start-up doesn't depend on a package index.</p>
+
+<p>Health checks matter because “the container started” is not “the service is
+ready”. The HAPI image has no shell or <code class="language-plaintext highlighter-rouge">curl</code> to check itself, so the
+bridge's check tests both its own MLLP port and HAPI's metadata endpoint: the
+bridge is healthy only when the path to the FHIR server works.
+<code class="language-plaintext highlighter-rouge">docker compose up --wait</code> returns when every checked service is
+healthy, and <code class="language-plaintext highlighter-rouge">--wait-timeout</code> makes it fail instead of hanging. Here
+is the reviewer's first minute, from a fresh clone:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>ls
+<span class="go">adt.hl7</span>
+<span class="go">adt-prod.hl7</span>
+<span class="go">bridge.py</span>
+<span class="go">channels</span>
+<span class="go">compose.yaml</span>
+<span class="go">day.py</span>
+<span class="go">interface-spec.md</span>
+<span class="go">oie.curl</span>
+<span class="go">oncall.sh</span>
+<span class="go">README.md</span>
+<span class="go">RUNBOOK.md</span>
+<span class="go">snapshot.sh</span>
+<span class="gp">$ </span>git<span class="w"> </span>log<span class="w"> </span>--oneline
+<span class="go">c40b1f2 Lab: compose, bridge, OIE channel, docs</span>
+<span class="gp">$ </span><span class="nb">time</span><span class="w"> </span>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d<span class="w"> </span>--wait<span class="w"> </span>--wait-timeout<span class="w"> </span><span class="m">120</span>
+<span class="go"> Network hims-lab_default Creating </span>
+<span class="go"> Network hims-lab_default Creating </span>
+<span class="go"> Network hims-lab_default Created </span>
+<span class="go"> Network hims-lab_default Created </span>
+<span class="go"> Container hims-lab-hapi-1 Creating </span>
+<span class="go"> Container hims-lab-hapi-1 Created </span>
+<span class="go"> Container hims-lab-bridge-1 Creating </span>
+<span class="go"> Container hims-lab-bridge-1 Created </span>
+<span class="go"> Container hims-lab-oie-1 Creating </span>
+<span class="go"> Container hims-lab-oie-1 Created </span>
+<span class="go"> Container hims-lab-hapi-1 Starting </span>
+<span class="go"> Container hims-lab-hapi-1 Started </span>
+<span class="go"> Container hims-lab-bridge-1 Starting </span>
+<span class="go"> Container hims-lab-bridge-1 Started </span>
+<span class="go"> Container hims-lab-oie-1 Starting </span>
+<span class="go"> Container hims-lab-oie-1 Started </span>
+<span class="go"> Container hims-lab-oie-1 Waiting </span>
+<span class="go"> Container hims-lab-hapi-1 Waiting </span>
+<span class="go"> Container hims-lab-bridge-1 Waiting </span>
+<span class="go"> Container hims-lab-hapi-1 Healthy </span>
+<span class="go"> Container hims-lab-oie-1 Healthy </span>
+<span class="go"> Container hims-lab-bridge-1 Healthy </span>
+
+<span class="go">real	0m21.821s</span>
+<span class="go">user	0m0.111s</span>
+<span class="go">sys	0m0.047s</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>ps<span class="w"> </span>--format<span class="w"> </span><span class="s1">'table {{.Service}}\t{{.Status}}'</span>
+<span class="go">SERVICE   STATUS</span>
+<span class="go">bridge    Up 21 seconds (healthy)</span>
+<span class="go">hapi      Up 21 seconds</span>
+<span class="go">oie       Up 21 seconds (healthy)</span>
+</code></pre></div></div>
+
+<p>The <code class="language-plaintext highlighter-rouge">real</code> line is the number for your README, measured with the
+images already present; a first pull adds download time. Then check that you
+run what you think you run:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:8080/fhir/metadata<span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -r '.software | "\(.name) \(.version)"'</span>
+<span class="go">HAPI FHIR Server 8.12.0</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>https://localhost:8443/api/server/version<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="go">4.5.2</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>bridge<span class="w"> </span>python<span class="w"> </span>--version
+<span class="go">Python 3.12.12</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>bridge<span class="w"> </span>pip<span class="w"> </span>show<span class="w"> </span>hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-2
+<span class="go">Name: hl7</span>
+<span class="go">Version: 0.4.5</span>
+</code></pre></div></div>
+
+<blockquote>
+  <p><strong>Tested:</strong> OIE 4.5.2, the week 3 bridge and HAPI FHIR 8.12.0
+  ran together from one compose file. A message sent to OIE on port 6661 reached
+  HAPI through the bridge, and the sender received the bridge's AA (sessions
+  below). OIE reaches HAPI only through the bridge here; we did not try OIE's
+  own HTTP sender straight to HAPI.</p>
+</blockquote>
+
+<h1 id="deploying-an-oie-channel">Deploying an OIE channel</h1>
+
+<p>In week 3 we wrote the listener ourselves. In an integration engine the same
+job is a <em>channel</em>: a source connector that receives messages, optional
+filters and transformers, and destination connectors that send them on. OIE
+stores each channel as an XML document, and its REST API accepts and returns
+that XML, so a channel is a file you keep in git like any other code.</p>
+
+<p>Ours is as small as we could make it: a TCP listener in MLLP mode on port 6661,
+and one TCP sender in MLLP mode to <code class="language-plaintext highlighter-rouge">bridge:2575</code>. No transformer: the
+bridge already does the mapping, and one place for it means the spec has one
+piece of code to agree with. Most of the file is default data-type settings;
+these are the lines that matter:</p>
+
+<div class="language-xml highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="w">    </span><span class="nt">&lt;properties</span><span class="w"> </span><span class="na">class=</span><span class="s">"com.mirth.connect.connectors.tcp.TcpReceiverProperties"</span><span class="w"> </span><span class="na">version=</span><span class="s">"4.5.2"</span><span class="nt">&gt;</span>
+<span class="w">      </span><span class="nt">&lt;pluginProperties/&gt;</span>
+<span class="w">      </span><span class="nt">&lt;listenerConnectorProperties</span><span class="w"> </span><span class="na">version=</span><span class="s">"4.5.2"</span><span class="nt">&gt;</span>
+<span class="w">        </span><span class="nt">&lt;host&gt;</span>0.0.0.0<span class="nt">&lt;/host&gt;</span>
+<span class="w">        </span><span class="nt">&lt;port&gt;</span>6661<span class="nt">&lt;/port&gt;</span>
+<span class="w">      </span><span class="nt">&lt;/listenerConnectorProperties&gt;</span>
+<span class="w">      </span><span class="nt">&lt;sourceConnectorProperties</span><span class="w"> </span><span class="na">version=</span><span class="s">"4.5.2"</span><span class="nt">&gt;</span>
+<span class="w">        </span><span class="nt">&lt;responseVariable&gt;</span>d1<span class="nt">&lt;/responseVariable&gt;</span>
+<span class="w">    </span><span class="cm">&lt;!-- ... --&gt;</span>
+<span class="w">      </span><span class="nt">&lt;properties</span><span class="w"> </span><span class="na">class=</span><span class="s">"com.mirth.connect.connectors.tcp.TcpDispatcherProperties"</span><span class="w"> </span><span class="na">version=</span><span class="s">"4.5.2"</span><span class="nt">&gt;</span>
+<span class="w">        </span><span class="nt">&lt;pluginProperties/&gt;</span>
+<span class="w">        </span><span class="nt">&lt;destinationConnectorProperties</span><span class="w"> </span><span class="na">version=</span><span class="s">"4.5.2"</span><span class="nt">&gt;</span>
+<span class="w">          </span><span class="nt">&lt;queueEnabled&gt;</span>false<span class="nt">&lt;/queueEnabled&gt;</span>
+<span class="w">          </span><span class="nt">&lt;sendFirst&gt;</span>false<span class="nt">&lt;/sendFirst&gt;</span>
+<span class="w">          </span><span class="nt">&lt;retryIntervalMillis&gt;</span>10000<span class="nt">&lt;/retryIntervalMillis&gt;</span>
+<span class="w">    </span><span class="cm">&lt;!-- ... --&gt;</span>
+<span class="w">          </span><span class="nt">&lt;validateResponse&gt;</span>true<span class="nt">&lt;/validateResponse&gt;</span>
+<span class="w">    </span><span class="cm">&lt;!-- ... --&gt;</span>
+<span class="w">        </span><span class="nt">&lt;serverMode&gt;</span>false<span class="nt">&lt;/serverMode&gt;</span>
+<span class="w">        </span><span class="nt">&lt;remoteAddress&gt;</span>bridge<span class="nt">&lt;/remoteAddress&gt;</span>
+<span class="w">        </span><span class="nt">&lt;remotePort&gt;</span>2575<span class="nt">&lt;/remotePort&gt;</span>
+<span class="w">    </span><span class="cm">&lt;!-- ... --&gt;</span>
+<span class="w">        </span><span class="nt">&lt;responseTimeout&gt;</span>15000<span class="nt">&lt;/responseTimeout&gt;</span>
+</code></pre></div></div>
+
+<p>Read <code class="language-plaintext highlighter-rouge">responseVariable</code> twice: it decides what the sender gets
+back. <code class="language-plaintext highlighter-rouge">d1</code> means “the response from destination 1”, so the sender
+receives the bridge's own ACK, and AA still means what week 3 promised: the
+patient is stored. OIE could instead generate its own ACK on arrival, which is
+faster, but then AA means only “the engine has it” and OIE's queue is what
+someone must watch. <code class="language-plaintext highlighter-rouge">validateResponse</code> makes OIE read the bridge's
+ACK, so an AE or AR counts as an error in OIE's statistics.</p>
+
+<p>Writing channel XML from nothing is the hard part, and we didn't: we took a
+small HL7 test channel from OIE's source repository and swapped in the TCP
+connectors, using the field names from OIE's connector classes. The usual route
+is to build the channel in the Administrator GUI and export it. Either way, the
+file in git should be what the server exports, which we check below.</p>
+
+<p>The REST API wants basic authentication and an <code class="language-plaintext highlighter-rouge">X-Requested-With</code>
+header on every call. Any value will do, but without the header the server
+answers <code class="language-plaintext highlighter-rouge">400</code>; OIE's source calls this check
+<code class="language-plaintext highlighter-rouge">RequestedWithFilter</code>. The summary from the course overview:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code># OIE 4.5.2 REST API: basic auth plus
+# header X-Requested-With: OpenAPI
+POST /api/channels               # channel XML
+POST /api/channels/&lt;id&gt;/_deploy  # -&gt; 204
+GET  /api/channels/&lt;id&gt;/status   # -&gt; STARTED
+GET  /api/channels/&lt;id&gt;/statistics
+</code></pre></div></div>
+
+<p>We keep those options in a curl config file, <code class="language-plaintext highlighter-rouge">oie.curl</code>, passed
+with <code class="language-plaintext highlighter-rouge">-K</code>. Create the channel, deploy it, and ask for its state and
+counters:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>cat<span class="w"> </span>oie.curl
+<span class="gp"># </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>URL:<span class="w"> </span>what<span class="w"> </span>OIE<span class="w"> </span><span class="m">4</span>.5.2<span class="err">'</span>s<span class="w"> </span>REST<span class="w"> </span>API<span class="w"> </span>needs.
+<span class="gp"># </span>Lab<span class="w"> </span>only:<span class="w"> </span>self-signed<span class="w"> </span>certificate<span class="w"> </span>and<span class="w"> </span>default<span class="w"> </span>password.
+<span class="go">insecure</span>
+<span class="go">silent</span>
+<span class="go">user = "admin:admin"</span>
+<span class="go">header = "X-Requested-With: OpenAPI"</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-m1<span class="w"> </span><span class="s1">'&lt;id&gt;'</span><span class="w"> </span>channels/adt-to-bridge.xml
+<span class="go">  &lt;id&gt;6e0d3c1a-7b2f-4c55-9e1a-0a5d2f3b6c01&lt;/id&gt;</span>
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">OIE</span><span class="o">=</span>https://localhost:8443/api
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">CH</span><span class="o">=</span>6e0d3c1a-7b2f-4c55-9e1a-0a5d2f3b6c01
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/xml'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@channels/adt-to-bridge.xml<span class="w"> </span><span class="nv">$OIE</span>/channels<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="go">{"boolean":true}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span>/_deploy
+<span class="go">204</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Accept: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="gp">  $</span>OIE/channels/<span class="nv">$CH</span>/status<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.dashboardStatus.state
+<span class="go">STARTED</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Accept: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="gp">  $</span>OIE/channels/<span class="nv">$CH</span>/statistics<span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -c '.channelStatistics | del(.serverId, .channelId)'</span>
+<span class="go">{"received":0,"sent":0,"error":0,"filtered":0,"queued":0}</span>
+</code></pre></div></div>
+
+<p>Later sessions use the same <code class="language-plaintext highlighter-rouge">$OIE</code> and <code class="language-plaintext highlighter-rouge">$CH</code>. Creating
+stores the channel; deploying starts the listener. Now send week 3's admission
+through the engine:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span>
+<span class="go">MSH|^~\&amp;|BRIDGE|LAB|REGADT|GENHOSP|20261031221512||ACK^A01^ACK|63042215126766400I1E|T|2.5.1</span>
+<span class="go">MSA|AA|MSG00001</span>
+<span class="go"></span>
+<span class="gp">$ </span>./snapshot.sh
+<span class="go">1 patients, 1 versions, sha256 6a37a2ca824f531a</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>logs<span class="w"> </span>--no-log-prefix<span class="w"> </span>bridge
+<span class="go">listening for MLLP on port 2575</span>
+<span class="go">MSG00001 AA after HTTP 201 http://hapi:8080/fhir/Patient/1000/_history/1</span>
+</code></pre></div></div>
+
+<p>The ACK came from the bridge (sending application <code class="language-plaintext highlighter-rouge">BRIDGE</code>) through
+OIE, after HAPI answered <code class="language-plaintext highlighter-rouge">201 Created</code>. <code class="language-plaintext highlighter-rouge">snapshot.sh</code>,
+shown below, counts patients and versions and fingerprints what they say.</p>
+
+<h2 id="test-vs-prod">TEST vs PROD feeds (MSH-11)</h2>
+
+<p>Every interface exists at least twice: a TEST feed for trying changes,
+training staff and loading made-up patients, and a PROD feed carrying real
+patients into real charts. Mixing them up hurts both ways. Test messages in
+production put fictional results into the record of a real person whose MRN
+happens to match. Production messages in a test system copy real health
+information to a place with weaker access controls, which is a privacy breach in
+itself.</p>
+
+<p>The first defence is separate hosts, ports and credentials. The second is in
+the message: <code class="language-plaintext highlighter-rouge">MSH-11</code>, the processing ID. Our bridge is a test
+listener and accepts only <code class="language-plaintext highlighter-rouge">T</code>. <code class="language-plaintext highlighter-rouge">adt-prod.hl7</code> is the same
+admission marked <code class="language-plaintext highlighter-rouge">P</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>adt-prod.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-1<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d<span class="s1">'|'</span><span class="w"> </span>-f9-12
+<span class="go">ADT^A01^ADT_A01|MSG00004|P|2.5.1</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt-prod.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span>
+<span class="go">MSH|^~\&amp;|BRIDGE|LAB|REGADT|GENHOSP|20261031221512||ACK^A01^ACK|6304221512888967CY6K|P|2.5.1</span>
+<span class="go">MSA|AR|MSG00004</span>
+<span class="go">ERR||MSH^1^11|202^Unsupported processing id^HL70357|E</span>
+<span class="go"></span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Accept: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="gp">  $</span>OIE/channels/<span class="nv">$CH</span>/statistics<span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -c '.channelStatistics | del(.serverId, .channelId)'</span>
+<span class="go">{"received":2,"sent":1,"error":1,"filtered":0,"queued":0}</span>
+</code></pre></div></div>
+
+<p>The bridge answered AR with <code class="language-plaintext highlighter-rouge">ERR</code> code 202, unsupported processing
+ID, and wrote nothing. Because the channel validates responses, OIE counted the
+AR as an error: one sent, one error. The on-call check reads that counter
+later. A production receiver should refuse <code class="language-plaintext highlighter-rouge">T</code> just as firmly, with
+the allowed value set per environment, never a default that accepts
+anything.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>MSH-11</th><th>Meaning (HL7 table 0103)</th><th>Our TEST feed</th></tr></thead>
+  <tbody>
+    <tr><td><code class="language-plaintext highlighter-rouge">T</code></td><td>Training (test)</td><td>processed; AA after the write</td></tr>
+    <tr><td><code class="language-plaintext highlighter-rouge">P</code></td><td>Production</td><td>AR, <code class="language-plaintext highlighter-rouge">ERR</code> 202, nothing written</td></tr>
+    <tr><td><code class="language-plaintext highlighter-rouge">D</code></td><td>Debugging</td><td>AR, <code class="language-plaintext highlighter-rouge">ERR</code> 202, nothing written</td></tr>
+  </tbody>
+</table>
+</div>
+
+<blockquote>
+  <p><strong>Canada:</strong> the same practice. Connections to provincial
+  systems, such as client registries and drug or lab repositories, typically
+  start in a test or conformance environment, and getting access to it can
+  take longer than building the interface. Ask early which environment you
+  will be given.</p>
+</blockquote>
+
+<h1 id="replaying-a-day">Replaying a day of traffic safely</h1>
+
+<p>Sooner or later you will be asked to send a lot of messages again: the bridge
+was down overnight and the sender gave up, a database was restored from last
+night's backup, or a new downstream system needs yesterday's admissions.
+Engines and senders keep message archives for this, and replay is routine, as
+long as the receiver can take it.</p>
+
+<p>Week 3 made the receiver idempotent: the bridge writes with a FHIR
+<a href="https://hl7.org/fhir/R4/http.html#cond-update">conditional update</a>
+keyed on the MRN, so the same message twice leaves the same state as once.
+Replay tests that at the scale of a day. <code class="language-plaintext highlighter-rouge">day.py</code> writes a synthetic
+day for 100 made-up patients: an admission each, a demographics update for some,
+a discharge for others, in time order:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>python3<span class="w"> </span>day.py<span class="w"> </span>&gt;<span class="w"> </span>day.hl7
+<span class="gp">$ </span>grep<span class="w"> </span>-c<span class="w"> </span><span class="s1">'^MSH'</span><span class="w"> </span>day.hl7
+<span class="go">207</span>
+<span class="gp">$ </span>cut<span class="w"> </span>-d<span class="s1">'|'</span><span class="w"> </span>-f9<span class="w"> </span>day.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c
+<span class="go">    100 ADT^A01^ADT_A01</span>
+<span class="go">     63 ADT^A03^ADT_A03</span>
+<span class="go">     44 ADT^A08^ADT_A01</span>
+<span class="gp">$ </span>head<span class="w"> </span>-2<span class="w"> </span>day.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span>
+<span class="go">MSH|^~\&amp;|REGADT|GENHOSP|BRIDGE|LAB|20261030000500||ADT^A01^ADT_A01|DAY00001|T|2.5.1</span>
+<span class="go">EVN|A01|20261030000500</span>
+<span class="go">PID|1||300041^^^GENHOSP^MR||GARCIA^TAYLOR||19530319|F</span>
+<span class="go">PV1|1|I|4W^401^A</span>
+
+<span class="go">MSH|^~\&amp;|REGADT|GENHOSP|BRIDGE|LAB|20261030001300||ADT^A01^ADT_A01|DAY00002|T|2.5.1</span>
+<span class="go">EVN|A01|20261030001300</span>
+<span class="go">PID|1||300080^^^GENHOSP^MR||ROY^ALEX||19420926|F</span>
+<span class="go">PV1|1|I|4W^402^A</span>
+</code></pre></div></div>
+
+<p>To prove nothing changed we need a fingerprint that ignores what
+<em>should</em> change, such as server ids, versions and timestamps:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="ch">#!/usr/bin/env bash</span>
+<span class="c1"># What the FHIR server says about patients: how many, how many</span>
+<span class="c1"># versions, and a fingerprint of identity fields (not ids/versions).</span>
+<span class="c1"># Same fingerprint before and after a replay = nothing changed.</span>
+<span class="c1"># shortcut: reads one page (_count=500); page through</span>
+<span class="c1"># Bundle.link "next" for bigger servers.</span>
+<span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+<span class="nv">FHIR</span><span class="o">=</span><span class="si">${</span><span class="nv">FHIR</span><span class="k">:-</span><span class="nv">http</span><span class="p">://localhost:</span><span class="nv">8080</span><span class="p">/fhir</span><span class="si">}</span>
+<span class="c1"># no-cache: HAPI otherwise reuses recent search results</span>
+get<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>curl<span class="w"> </span>-sf<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Cache-Control: no-cache'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/</span><span class="nv">$1</span><span class="s2">"</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="nv">all</span><span class="o">=</span><span class="k">$(</span>get<span class="w"> </span><span class="s1">'Patient?_count=500'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'[.entry[]?.resource |</span>
+<span class="s1">  [.identifier[0].value, .name, .gender, .birthDate]] | sort'</span><span class="k">)</span>
+<span class="nv">versions</span><span class="o">=</span><span class="k">$(</span>get<span class="w"> </span><span class="s1">'Patient/_history?_summary=count'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total<span class="k">)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="k">$(</span>jq<span class="w"> </span>length<span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">"</span><span class="nv">$all</span><span class="s2">"</span><span class="k">)</span><span class="s2"> patients, </span><span class="nv">$versions</span><span class="s2"> versions,"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"sha256 </span><span class="k">$(</span>sha256sum<span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">"</span><span class="nv">$all</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-c1-16<span class="k">)</span><span class="s2">"</span>
+</code></pre></div></div>
+
+<p>Send the day, then send the whole day again:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>./snapshot.sh
+<span class="go">1 patients, 1 versions, sha256 6a37a2ca824f531a</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>day.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-c<span class="w"> </span><span class="s1">'MSA|AA'</span>
+<span class="go">207</span>
+<span class="gp">$ </span>./snapshot.sh
+<span class="go">101 patients, 134 versions, sha256 52b3bb252a6ac2db</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>day.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-c<span class="w"> </span><span class="s1">'MSA|AA'</span>
+<span class="go">207</span>
+<span class="gp">$ </span>./snapshot.sh
+<span class="go">101 patients, 200 versions, sha256 52b3bb252a6ac2db</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>logs<span class="w"> </span>bridge<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-o<span class="w"> </span><span class="s1">'HTTP 20[01]'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c
+<span class="go">    314 HTTP 200</span>
+<span class="go">    101 HTTP 201</span>
+</code></pre></div></div>
+
+<p>All 207 messages got AA both times. After each pass there were 101 patients
+(Jane Doe plus the day's 100) with the same fingerprint, and the bridge's log
+shows 101 creates; every other write was an update. A replayed day creates no
+duplicates.</p>
+
+<p>Look at the versions, though: 134 after the first pass, 200 after the second.
+Idempotent doesn't mean “nothing happens”. Replaying a patient's A01 put back the
+name from before their A08, and HAPI stored a version; the replayed A08 then
+restored the corrected name and HAPI stored another. Each of the 33 patients
+whose A08 changed something gained two versions. For a moment a clinician, or a
+system subscribed to Patient changes, could have seen the old name. So replay in
+the original order, and from the point of failure to the end, never an old
+slice: an old A01 on its own leaves the patient rewound.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> in a rehearsal run, a plain
+  <code class="language-plaintext highlighter-rouge">Patient?_summary=count</code> still said 1 just after the day's 100
+  patients were created: HAPI reuses recent search results for a short time.
+  <code class="language-plaintext highlighter-rouge">snapshot.sh</code> sends <code class="language-plaintext highlighter-rouge">Cache-Control: no-cache</code> to get
+  fresh results.</p>
+</blockquote>
+
+<p>Note that the key is the MRN, not <code class="language-plaintext highlighter-rouge">MSH-10</code>: our replay reused the
+archive's control IDs, but a sender that regenerates messages would give the
+same facts new ones. Identity decides what to write; control IDs only trace.</p>
+
+<h1 id="change-windows-review-and-rollback">Change windows, review and rollback</h1>
+
+<p>Every change to a production interface is a risk to every patient whose
+messages flow through it, and hospitals manage that risk with process. Changes
+are requested in a ticket, reviewed, approved (often by a change advisory board
+when clinical systems are involved) and scheduled into a <em>change
+window</em>: an agreed time, usually when volume is low, when the affected teams
+expect trouble and someone is watching. Each request says how the change will be
+tested afterwards and how it will be undone.</p>
+
+<p>A reviewer needs something to review, and an engine's GUI doesn't produce
+diffs. So the channel lives in git, and the file in git must be what the engine
+runs. Export it and compare:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span><span class="w"> </span>-o<span class="w"> </span>channels/adt-to-bridge.xml
+<span class="gp">$ </span>git<span class="w"> </span>status<span class="w"> </span>--short
+<span class="gp">$ </span>git<span class="w"> </span>diff<span class="w"> </span>--exit-code<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'engine and git agree'</span>
+<span class="go">engine and git agree</span>
+</code></pre></div></div>
+
+<p>The export matches the committed file byte for byte: channel exports and code
+agree. Run this before every change, in case someone edited the channel in the
+GUI since the last export.</p>
+
+<p>Now a real change. Today, if the bridge is down, the sender gets no AA and the
+messages pile up in the <em>sender's</em> queue, where we can't see them.
+Turning on OIE's destination queue in “on failure” mode makes OIE try the bridge
+first and, if that fails, keep the message and retry itself. In the GUI it is a
+drop-down; in git it is two lines:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>sed<span class="w"> </span>-i<span class="w"> </span>-e<span class="w"> </span><span class="s1">'s|&lt;queueEnabled&gt;false|&lt;queueEnabled&gt;true|'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="s1">'s|&lt;sendFirst&gt;false|&lt;sendFirst&gt;true|'</span><span class="w"> </span>channels/adt-to-bridge.xml
+<span class="gp">$ </span>git<span class="w"> </span>diff
+<span class="go">diff --git a/channels/adt-to-bridge.xml b/channels/adt-to-bridge.xml</span>
+<span class="go">index 7a4c617..9daaf34 100644</span>
+<span class="go">--- a/channels/adt-to-bridge.xml</span>
+<span class="go">+++ b/channels/adt-to-bridge.xml</span>
+<span class="go">@@ -149,8 +149,8 @@</span>
+<span class="go">       &lt;properties class="com.mirth.connect.connectors.tcp.TcpDispatcherProperties" version="4.5.2"&gt;</span>
+<span class="go">         &lt;pluginProperties/&gt;</span>
+<span class="go">         &lt;destinationConnectorProperties version="4.5.2"&gt;</span>
+<span class="go">-          &lt;queueEnabled&gt;false&lt;/queueEnabled&gt;</span>
+<span class="go">-          &lt;sendFirst&gt;false&lt;/sendFirst&gt;</span>
+<span class="go">+          &lt;queueEnabled&gt;true&lt;/queueEnabled&gt;</span>
+<span class="go">+          &lt;sendFirst&gt;true&lt;/sendFirst&gt;</span>
+<span class="go">           &lt;retryIntervalMillis&gt;10000&lt;/retryIntervalMillis&gt;</span>
+<span class="go">           &lt;regenerateTemplate&gt;false&lt;/regenerateTemplate&gt;</span>
+<span class="go">           &lt;retryCount&gt;0&lt;/retryCount&gt;</span>
+<span class="gp">$ </span>git<span class="w"> </span>commit<span class="w"> </span>-qam<span class="w"> </span><span class="s1">'bridge destination: queue on failure'</span>
+</code></pre></div></div>
+
+<p>A good reviewer asks what the diff doesn't say: when OIE queues a message,
+what does the sender get back, given that the source still answers with
+<code class="language-plaintext highlighter-rouge">d1</code>? We'll find out. Deploy with <code class="language-plaintext highlighter-rouge">PUT</code>, which replaces the
+stored channel, then export again:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/xml'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@channels/adt-to-bridge.xml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$OIE</span><span class="s2">/channels/</span><span class="nv">$CH</span><span class="s2">?override=true"</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="go">{"boolean":true}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span>/_deploy
+<span class="go">204</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span><span class="w"> </span>-o<span class="w"> </span>channels/adt-to-bridge.xml
+<span class="gp">$ </span>git<span class="w"> </span>diff<span class="w"> </span>-U0<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="s1">'^[-+] '</span>
+<span class="go">-  &lt;revision&gt;1&lt;/revision&gt;</span>
+<span class="go">+  &lt;revision&gt;2&lt;/revision&gt;</span>
+<span class="gp">$ </span>git<span class="w"> </span>commit<span class="w"> </span>-qam<span class="w"> </span><span class="s1">'Export after deploy'</span>
+<span class="gp">$ </span>git<span class="w"> </span>log<span class="w"> </span>--oneline
+<span class="go">09af831 Export after deploy</span>
+<span class="go">19508dd bridge destination: queue on failure</span>
+<span class="go">c40b1f2 Lab: compose, bridge, OIE channel, docs</span>
+</code></pre></div></div>
+
+<p>The server's export differs from our commit only in the revision number,
+which it bumps on every save. Committing the export keeps git and the engine in
+step and records the deploy.</p>
+
+<h2 id="when-the-bridge-goes-down">When the bridge goes down</h2>
+
+<p>Stop the bridge and send the day's last five messages, as a sender would
+after a short outage:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>stop<span class="w"> </span>bridge
+<span class="go"> Container hims-lab-bridge-1 Stopping </span>
+<span class="go"> Container hims-lab-bridge-1 Stopped </span>
+<span class="gp">$ </span>tail<span class="w"> </span>-5<span class="w"> </span>day.hl7<span class="w"> </span>&gt;<span class="w"> </span>burst.hl7
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>burst.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>od<span class="w"> </span>-An<span class="w"> </span>-c
+<span class="go">  \v 034  \r  \n  \v 034  \r  \n  \v 034  \r  \n  \v 034  \r  \n</span>
+<span class="go">  \v 034  \r  \n</span>
+<span class="gp">$ </span>./oncall.sh<span class="w"> </span><span class="nv">$CH</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">received=421 error=1 (0%) queued=5</span>
+<span class="go">PAGE: interface needs a human</span>
+<span class="go">exit 2</span>
+</code></pre></div></div>
+
+<p>There is the reviewer's answer. For each queued message OIE sent back an
+empty MLLP frame: <code class="language-plaintext highlighter-rouge">\v</code> (<code class="language-plaintext highlighter-rouge">0x0B</code>) and then <code class="language-plaintext highlighter-rouge">034 \r</code>
+(<code class="language-plaintext highlighter-rouge">0x1C 0x0D</code>) with no ACK inside; the <code class="language-plaintext highlighter-rouge">\n</code> is
+<code class="language-plaintext highlighter-rouge">mllp_send</code>'s own line break. That's not AA, so a careful sender
+resends, which is safe only because the receiver is idempotent. The behaviour
+belongs in the interface spec, and the change shouldn't be approved without
+it.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> with the destination queued on failure and the
+  source responding with <code class="language-plaintext highlighter-rouge">d1</code>, OIE 4.5.2 answered each message sent
+  while the bridge was stopped with an empty MLLP frame
+  (<code class="language-plaintext highlighter-rouge">0b 1c 0d</code>), and counted it as queued, not as an error.</p>
+</blockquote>
+
+<p>The other half of the output is the on-call check paging. An interface that
+pages on every error trains people to ignore pages: one malformed message is a
+ticket for the morning, and the sender already knows because it got an AE. What
+needs a human now is a sign that many patients are affected: messages piling up
+behind a broken downstream system, or a whole class of messages failing. So
+alert on queue depth and error rates, not on every error:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="ch">#!/usr/bin/env bash</span>
+<span class="c1"># Page a human on queue depth or error rate, not on every error.</span>
+<span class="c1"># Usage: ./oncall.sh &lt;channel-id&gt;   (cron it every minute)</span>
+<span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+<span class="nv">OIE</span><span class="o">=</span><span class="si">${</span><span class="nv">OIE</span><span class="k">:-</span><span class="nv">https</span><span class="p">://localhost:</span><span class="nv">8443</span><span class="p">/api</span><span class="si">}</span>
+<span class="nv">MAX_QUEUED</span><span class="o">=</span><span class="si">${</span><span class="nv">MAX_QUEUED</span><span class="k">:-</span><span class="nv">3</span><span class="si">}</span><span class="w">     </span><span class="c1"># messages waiting downstream</span>
+<span class="nv">MAX_ERR_PCT</span><span class="o">=</span><span class="si">${</span><span class="nv">MAX_ERR_PCT</span><span class="k">:-</span><span class="nv">5</span><span class="si">}</span><span class="w">   </span><span class="c1"># errors per 100 received</span>
+
+<span class="nv">stats</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-sfk<span class="w"> </span>-u<span class="w"> </span>admin:admin<span class="w"> </span>-H<span class="w"> </span><span class="s1">'X-Requested-With: OpenAPI'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'Accept: application/json'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$OIE</span><span class="s2">/channels/</span><span class="nv">$1</span><span class="s2">/statistics"</span><span class="k">)</span>
+<span class="nb">read</span><span class="w"> </span>-r<span class="w"> </span>rcv<span class="w"> </span>err<span class="w"> </span>q<span class="w"> </span>&lt;<span class="w"> </span>&lt;<span class="o">(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.channelStatistics |</span>
+<span class="s1">  "\(.received) \(.error) \(.queued)"'</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">"</span><span class="nv">$stats</span><span class="s2">"</span><span class="o">)</span>
+<span class="nv">pct</span><span class="o">=</span><span class="k">$((</span><span class="w"> </span><span class="nv">rcv</span><span class="w"> </span>?<span class="w"> </span><span class="m">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nv">err</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nv">rcv</span><span class="w"> </span>:<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="k">))</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"received=</span><span class="nv">$rcv</span><span class="s2"> error=</span><span class="nv">$err</span><span class="s2"> (</span><span class="si">${</span><span class="nv">pct</span><span class="si">}</span><span class="s2">%) queued=</span><span class="nv">$q</span><span class="s2">"</span>
+<span class="k">if</span><span class="w"> </span><span class="o">((</span><span class="w"> </span>q<span class="w"> </span>&gt;<span class="w"> </span>MAX_QUEUED<span class="w"> </span><span class="o">||</span><span class="w"> </span>pct<span class="w"> </span>&gt;<span class="w"> </span>MAX_ERR_PCT<span class="w"> </span><span class="o">))</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"PAGE: interface needs a human"</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">2</span>
+<span class="k">fi</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"OK"</span>
+</code></pre></div></div>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Signal</th><th>Why</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>Queue depth above a threshold</td><td>messages are not reaching the chart</td><td>page now</td></tr>
+    <tr><td>Error rate above a threshold</td><td>a whole class of messages is failing</td><td>page now</td></tr>
+    <tr><td>No messages for longer than usual</td><td>the sender or the network is down</td><td>page in the daytime, check at night</td></tr>
+    <tr><td>A single AE or AR</td><td>one bad message; the sender knows</td><td>next-day error review</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Our check found 421 received, 1 error (the PROD message, well under 5%) and
+5 queued, over the threshold of 3, so it paged and exited with status 2, which
+is what cron or a monitoring agent acts on. Set real thresholds from the feed's
+normal volume. We didn't build the missing-traffic check: an ADT feed that goes
+silent at 10 a.m. on a weekday is broken even if every counter looks fine.</p>
+
+<p>Start the bridge again and give OIE one retry interval (10 seconds in our
+channel) to drain:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>start<span class="w"> </span>--wait<span class="w"> </span>--wait-timeout<span class="w"> </span><span class="m">120</span><span class="w"> </span>bridge
+<span class="go"> Container hims-lab-bridge-1 Starting </span>
+<span class="go"> Container hims-lab-bridge-1 Started </span>
+<span class="go"> Container hims-lab-bridge-1 Waiting </span>
+<span class="go"> Container hims-lab-hapi-1 Waiting </span>
+<span class="go"> Container hims-lab-hapi-1 Healthy </span>
+<span class="go"> Container hims-lab-bridge-1 Healthy </span>
+<span class="gp">$ </span>sleep<span class="w"> </span><span class="m">15</span>
+<span class="gp">$ </span>./oncall.sh<span class="w"> </span><span class="nv">$CH</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">received=421 error=1 (0%) queued=0</span>
+<span class="go">OK</span>
+<span class="go">exit 0</span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>logs<span class="w"> </span>--no-log-prefix<span class="w"> </span>bridge<span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-6
+<span class="go">listening for MLLP on port 2575</span>
+<span class="go">DAY00203 AA after HTTP 200 http://hapi:8080/fhir/Patient/1094/_history/1</span>
+<span class="go">DAY00204 AA after HTTP 200 http://hapi:8080/fhir/Patient/1095/_history/1</span>
+<span class="go">DAY00205 AA after HTTP 200 http://hapi:8080/fhir/Patient/1096/_history/4</span>
+<span class="go">DAY00206 AA after HTTP 200 http://hapi:8080/fhir/Patient/1097/_history/1</span>
+<span class="go">DAY00207 AA after HTTP 200 http://hapi:8080/fhir/Patient/1100/_history/1</span>
+<span class="gp">$ </span>./snapshot.sh
+<span class="go">101 patients, 200 versions, sha256 52b3bb252a6ac2db</span>
+</code></pre></div></div>
+
+<p>The queue is empty, the check is quiet, the bridge's log shows the five
+queued messages, and the fingerprint is unchanged, because these were the day's
+latest messages. OIE's lifetime counters only grow, so a real check compares
+with its previous run and computes a rate; that's an exercise.</p>
+
+<h2 id="tested-rollback">A rollback you have actually run</h2>
+
+<p>The second watch-out: a rollback plan nobody has run. Change requests always
+have a rollback section, often one line written by someone who never tried it.
+Find out before the window whether the previous version can be restored, how
+long it takes, and how you will know it worked. With the channel in git,
+rollback is just another deploy of a reviewed commit:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>git<span class="w"> </span>revert<span class="w"> </span>--no-edit<span class="w"> </span>HEAD~1
+<span class="go">Auto-merging channels/adt-to-bridge.xml</span>
+<span class="go">[main 9733c98] Revert "bridge destination: queue on failure"</span>
+<span class="go"> Date: Sat Oct 31 22:16:08 2026 +0000</span>
+<span class="go"> 1 file changed, 2 insertions(+), 2 deletions(-)</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-o<span class="w"> </span><span class="s1">'&lt;queueEnabled&gt;[a-z]*'</span><span class="w"> </span>channels/adt-to-bridge.xml
+<span class="go">&lt;queueEnabled&gt;false</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/xml'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@channels/adt-to-bridge.xml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$OIE</span><span class="s2">/channels/</span><span class="nv">$CH</span><span class="s2">?override=true"</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="go">{"boolean":true}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span>/_deploy
+<span class="go">204</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Accept: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="gp">  $</span>OIE/channels/<span class="nv">$CH</span>/status<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.dashboardStatus.state
+<span class="go">STARTED</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-K<span class="w"> </span>oie.curl<span class="w"> </span><span class="nv">$OIE</span>/channels/<span class="nv">$CH</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-o<span class="w"> </span><span class="s1">'&lt;queueEnabled&gt;[a-z]*'</span>
+<span class="go">&lt;queueEnabled&gt;false</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA
+<span class="go">MSA|AA|MSG00001</span>
+<span class="gp">$ </span>git<span class="w"> </span>log<span class="w"> </span>--oneline
+<span class="go">9733c98 Revert "bridge destination: queue on failure"</span>
+<span class="go">09af831 Export after deploy</span>
+<span class="go">19508dd bridge destination: queue on failure</span>
+<span class="go">c40b1f2 Lab: compose, bridge, OIE channel, docs</span>
+</code></pre></div></div>
+
+<p>Git reverted the queue change, the engine took the reverted file, the deployed
+channel reads <code class="language-plaintext highlighter-rouge">queueEnabled</code> false, and a test message gets AA end to
+end. The history tells the story of the change window. Time a rehearsal like
+this and put the number in the change request.</p>
+
+<p>Not everything rolls back this neatly. If a bad mapping wrote wrong birth
+dates for an hour, reverting the channel stops the damage but doesn't repair it:
+you find the affected patients and correct or replay them. Another reason to
+keep the archive and make replay safe.</p>
+
+<h1 id="downtime-procedures">Downtime procedures</h1>
+
+<p>Systems go down on purpose (upgrades, migrations) and by accident, and the
+hospital keeps working on downtime procedures: paper forms, read-only copies of
+key reports, phone calls instead of electronic orders. ONC's
+<a href="https://www.healthit.gov/topic/safety/safer-guides">SAFER Guides</a>
+include one on contingency planning for planned and unplanned EHR
+unavailability; read it before your first scheduled downtime.</p>
+
+<p>For an interface team a downtime has three parts. Before: announce start and
+end times, and confirm senders will queue rather than give up after a retry
+limit. During: watch the queues grow at the expected rate. After: drain the
+queues, replay from the archive whatever was dropped, send a test message, check
+the queue is at zero, and tell the units. Then everything done on paper gets
+entered, and those registrations arrive hours late and out of order: week 3's
+A08-before-A01 case, at volume.</p>
+
+<p>Finally, the stop step from the runbook:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>down
+<span class="go"> Container hims-lab-oie-1 Stopping </span>
+<span class="go"> Container hims-lab-oie-1 Stopped </span>
+<span class="go"> Container hims-lab-oie-1 Removing </span>
+<span class="go"> Container hims-lab-oie-1 Removed </span>
+<span class="go"> Container hims-lab-bridge-1 Stopping </span>
+<span class="go"> Container hims-lab-bridge-1 Stopped </span>
+<span class="go"> Container hims-lab-bridge-1 Removing </span>
+<span class="go"> Container hims-lab-bridge-1 Removed </span>
+<span class="go"> Container hims-lab-hapi-1 Stopping </span>
+<span class="go"> Container hims-lab-hapi-1 Stopped </span>
+<span class="go"> Container hims-lab-hapi-1 Removing </span>
+<span class="go"> Container hims-lab-hapi-1 Removed </span>
+<span class="go"> Network hims-lab_default Removing </span>
+<span class="go"> Network hims-lab_default Removed </span>
+<span class="gp">$ </span>docker<span class="w"> </span>compose<span class="w"> </span>ps<span class="w"> </span>-a
+<span class="go">NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS</span>
+</code></pre></div></div>
+
+<p>The containers and network are gone, and so is every patient: this HAPI image
+keeps its database inside the container, as week 3 found. Fine for a lab you
+rebuild in under a minute, and the runbook warns about it; a production FHIR
+server keeps its data in a database that outlives containers.</p>
+
+<h1 id="writing-it-down">Writing it down: interface spec and runbook</h1>
+
+<p>An interface spec is the contract between sending and receiving teams; when a
+message is rejected at 3 a.m., it decides whose problem it is. Ours covers the
+connection (transport, ports, network path, HL7 version, processing ID, ACK
+mode), the trigger events and what each does, segments used and ignored,
+field-by-field mappings from <code class="language-plaintext highlighter-rouge">PID</code> to FHIR, the ACK rules, duplicate
+and replay handling, and monitoring. Its ACK rules:</p>
+
+<div class="language-md highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gu">## ACK rules</span>
+| Situation | ACK | ERR |
+|-----------|-----|-----|
+| Patient written (HTTP 200 or 201) | AA | |
+| MSH-11 is not <span class="sb">`T`</span> | AR | MSH^1^11, 202 |
+| PID-3 missing | AE | PID^1^3, 101 |
+| Unknown assigning authority | AE | PID^1^3, 103 |
+| Bad birth date | AE | PID^1^7, 102 |
+| MRN already on several patients (HTTP 412) | AE | PID^1^3, 205 |
+| Other HTTP 4xx | AE | PID, 207 |
+| FHIR server down or 5xx | none: connection closed, sender retries | |
+
+AA is sent only after the FHIR write has committed.
+</code></pre></div></div>
+
+<p>Every row is a branch in <code class="language-plaintext highlighter-rouge">bridge.py</code>, so you check that spec and
+code agree by reading them side by side and keeping a test message per row, as
+week 3's broken message set did. Writing the spec also finds gaps: ours lists
+<code class="language-plaintext highlighter-rouge">A40</code> as an open item, because the bridge doesn't check
+<code class="language-plaintext highlighter-rouge">MSH-9</code> yet and would treat a merge as an ordinary update.</p>
+
+<p>The runbook is for the person on call who didn't build the interface, which in
+six months includes you. Ours covers start, stop, health check, change, roll
+back, bridge or FHIR server down, replay and planned downtime, as commands and
+expected results copied from the sessions on this page. A step nobody has run
+doesn't belong in a runbook unless it is marked untested.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> let it draft the runbook and spec; run every step by hand.</p>
+</blockquote>
+
+<p>Download the lab files:
+<a href="static/files/week-6/compose.yaml">compose.yaml</a>,
+<a href="static/files/week-6/bridge.py">bridge.py</a>,
+<a href="static/files/week-6/adt-to-bridge.xml">adt-to-bridge.xml</a> (the
+channel; keep it in <code class="language-plaintext highlighter-rouge">channels/</code>),
+<a href="static/files/week-6/oie.curl">oie.curl</a>,
+<a href="static/files/week-6/day.py">day.py</a>,
+<a href="static/files/week-6/snapshot.sh">snapshot.sh</a>,
+<a href="static/files/week-6/oncall.sh">oncall.sh</a>,
+<a href="static/files/week-6/adt.hl7">adt.hl7</a>,
+<a href="static/files/week-6/adt-prod.hl7">adt-prod.hl7</a>,
+<a href="static/files/week-6/interface-spec.md">interface-spec.md</a>,
+<a href="static/files/week-6/RUNBOOK.md">RUNBOOK.md</a> and
+<a href="static/files/week-6/README.md">README.md</a>.</p>
+
+<h1 id="what-employers-run">What employers run</h1>
+
+<p>You won't find OIE everywhere, and the ideas transfer. Integration job ads name
+engines such as Rhapsody, Cloverleaf, Epic Bridges and Mirth (Mirth Connect,
+which OIE forked). Each has this week's parts under other names: inbound and
+outbound connections, routes or channels, transformers, queues, ACK settings,
+alerting and configuration export. Epic Bridges is the interface module inside
+Epic, so its builders work for or alongside an Epic customer.</p>
+
+<p>At the ends of the feed are the clinical systems: Epic, Oracle Health,
+MEDITECH, TELUS Health. You don't need to have used them; you need to know what
+they send and expect. Employers test the skills in this course: find the field
+that broke a v2 message, explain what an ACK promises, map to FHIR without losing
+meaning, and change a running interface safely. When an ad names an engine you
+haven't used, map the concepts of the one you have.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> expect the same engines. You are likely to meet
+  MEDITECH in hospitals and TELUS Health in community clinics, alongside Epic
+  and Oracle Health, with provincial registries and health card numbers as
+  extra integration points.</p>
+</blockquote>
+
+<h1 id="portfolio-and-getting-hired">The portfolio README and getting hired</h1>
+
+<p>Your repo is the interview before the interview, and the README decides how a
+hiring manager spends their ten minutes. Ours opens with what the project does
+for a hospital, then a diagram of the flow, the exact commands with expected
+output, where to look, what was tested, and the limits. Limits are a strength:
+“default admin password, self-signed certificate, no TLS on MLLP, data lost on
+restart” shows you know a lab from production.</p>
+
+<p>Before you share the link, clone the repo into an empty directory on another
+machine, follow the README literally, and time it. Every step it was missing goes
+into it. A reviewer has it running in 10 minutes when you have watched it
+happen.</p>
+
+<p>Then prepare to talk about decisions, not features: why AA only after the
+write, why key on the MRN and not <code class="language-plaintext highlighter-rouge">MSH-10</code>, why page on queue depth,
+what happens when the FHIR server is down. Each answer here comes with a session
+you ran. <a href="interview-prep.html">Interview prep</a> has questions to
+practise and how to tell a project's story in a few minutes;
+<a href="on-the-job.html">On the job</a> covers the first weeks on an
+integration team: tickets, change windows and on-call.</p>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>A reviewer has it running in 10 minutes.</li>
+  <li>A replayed day creates no duplicates.</li>
+  <li>Spec, channel exports and code agree.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>How does replaying a day of messages stay duplicate-free? Replay
+  <code class="language-plaintext highlighter-rouge">day.hl7</code> backwards (<code class="language-plaintext highlighter-rouge">tac day.hl7</code>) after a normal pass
+  and compare <code class="language-plaintext highlighter-rouge">snapshot.sh</code>. Which patients would a clinician now see
+  wrongly named?</li>
+  <li>What should an on-call alert fire on? Make <code class="language-plaintext highlighter-rouge">oncall.sh</code> compute
+  the error rate over the last five minutes instead of lifetime counters, and add
+  a missing-traffic check.</li>
+  <li>What belongs in an interface spec? Write one for a results feed
+  (<code class="language-plaintext highlighter-rouge">ORU^R01</code>) into the same FHIR server.</li>
+  <li>The ten-minute test: give your repo and README to someone else. Time them,
+  note every question, and fix the README until the next person needs no
+  help.</li>
+  <li>Close the spec's open item: answer AR with <code class="language-plaintext highlighter-rouge">ERR</code> code 200
+  (unsupported message type) for events the spec doesn't list, and add a test
+  message for it.</li>
+  <li>Rehearse a failed change: deploy a channel pointing at the wrong bridge
+  port, detect it, and roll back from git. How long from deploy to AA?</li>
+  <li>Switch the source response from <code class="language-plaintext highlighter-rouge">d1</code> to an ACK OIE generates
+  itself and repeat the outage. What does the sender get, what does AA mean, and
+  which spec line changes?</li>
+  <li>Make the lab survive a restart: add Postgres to the compose file (without
+  publishing port 5432), point HAPI at it, and prove it with
+  <code class="language-plaintext highlighter-rouge">down</code>, <code class="language-plaintext highlighter-rouge">up</code> and <code class="language-plaintext highlighter-rouge">snapshot.sh</code>.</li>
+  <li>Make the accepted processing ID a bridge setting (<code class="language-plaintext highlighter-rouge">T</code> in test,
+  <code class="language-plaintext highlighter-rouge">P</code> in production). What should happen when it is missing?</li>
+  <li>Write your portfolio README and a two-minute spoken summary of one design
+  decision in it.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://github.com/OpenIntegrationEngine/engine">OIE</a></li>
+  <li><a href="https://hapifhir.io/">HAPI FHIR server</a></li>
+  <li><a href="https://github.com/OpenIntegrationEngine/engine-docker">OIE Docker image: the source of the image we ran</a></li>
+  <li><a href="https://docs.docker.com/reference/cli/docker/compose/up/"><code class="language-plaintext highlighter-rouge">docker compose up</code> reference (<code class="language-plaintext highlighter-rouge">--wait</code>)</a></li>
+  <li><a href="https://hl7.org/fhir/R4/http.html#cond-update">FHIR R4: conditional update</a></li>
+  <li><a href="https://python-hl7.readthedocs.io/en/latest/mllp_send.html">python-hl7: <code class="language-plaintext highlighter-rouge">mllp_send</code></a></li>
+  <li><a href="https://www.healthit.gov/topic/safety/safer-guides">ONC SAFER Guides, including Contingency Planning (EHR downtime)</a></li>
+  <li><a href="interview-prep.html">Interview prep</a></li>
+  <li><a href="on-the-job.html">On the job</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

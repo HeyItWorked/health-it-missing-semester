@@ -1,0 +1,6 @@
+# curl -K oie.curl URL: what OIE 4.5.2's REST API needs.
+# Lab only: self-signed certificate and default password.
+insecure
+silent
+user = "admin:admin"
+header = "X-Requested-With: OpenAPI"

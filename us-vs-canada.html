@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="What changes between US and Canadian health IT work.">
+
+  <title>US vs Canada: what changes &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">US vs Canada: what changes</h1>
+
+<div class="table-wrap">
+<table><thead><tr><th>Topic</th><th>United States</th><th>Canada</th></tr></thead><tbody>
+<tr><td>Privacy law</td><td>HIPAA; health apps outside HIPAA: FTC Health Breach Notification Rule and state laws</td><td>PHIPA (ON), HIA (AB), FIPPA/PIPA (BC), Law 5 (QC); PIPEDA (federal, private sector)</td></tr>
+<tr><td>Vendor contract</td><td>Business associate agreement (BAA), for HIPAA-covered work only</td><td>Agent or information-manager agreement</td></tr>
+<tr><td>Core data set</td><td>USCDI</td><td>CACDI (CIHI)</td></tr>
+<tr><td>FHIR profiles</td><td>US Core</td><td>CA Baseline; CA Core+ (still a draft)</td></tr>
+<tr><td>Diagnoses</td><td>ICD-10-CM</td><td>ICD-10-CA; OHIP physician billing uses ICD-9-based codes</td></tr>
+<tr><td>Procedures</td><td>ICD-10-PCS (hospital); CPT (billing)</td><td>CCI (hospital); provincial fee codes (billing)</td></tr>
+<tr><td>Drugs</td><td>RxNorm (drug concepts); NDC (product codes)</td><td>CCDD (drug concepts); DIN (product codes)</td></tr>
+<tr><td>Patient ID</td><td>Facility MRN, often linked by an enterprise ID</td><td>Provincial health card number plus facility MRN</td></tr>
+<tr><td>Wider exchange</td><td>TEFCA (national network)</td><td>Provincial EHRs and health information exchanges</td></tr>
+<tr><td>Breach reporting</td><td>HIPAA breach notification: individuals and HHS</td><td>Provincial acts; under PHIPA, patients and sometimes the IPC</td></tr>
+<tr><td>Hosting</td><td>A cloud covered by a BAA, for HIPAA work</td><td>Canadian regions; check provincial rules</td></tr>
+<tr><td>Also</td><td>—</td><td>OCAP® for First Nations data; software must be available in French in Quebec</td></tr></tbody></table>
+</div>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

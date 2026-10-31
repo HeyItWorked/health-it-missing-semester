@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Lab setup commands and the test record for the Health IT Missing Semester.">
+
+  <title>Lab setup &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">Lab setup</h1>
+<h2 class="subtitle">All run on 31 Oct 2026</h2>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>docker<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span>hapiproject/hapi
+docker<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">8443</span>:8443<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span>:6661<span class="w"> </span>openintegrationengine/engine
+java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span>-p<span class="w"> </span><span class="m">100</span><span class="w"> </span>--exporter.fhir.use_us_core_ig<span class="o">=</span><span class="nb">false</span>
+mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">6661</span><span class="w"> </span>localhost
+java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span>p.json<span class="w"> </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span>-ig<span class="w"> </span>hl7.fhir.ca.baseline
+</code></pre></div></div>
+
+<p>Load Synthea into HAPI by POSTing <code class="language-plaintext highlighter-rouge">hospitalInformation*</code>, <code class="language-plaintext highlighter-rouge">practitionerInformation*</code>, then patient bundles. OIE logs in as admin/admin; <code class="language-plaintext highlighter-rouge">pip install hl7</code> gives <code class="language-plaintext highlighter-rouge">mllp_send</code>; for Canadian patients put <a href="https://github.com/synthetichealth/synthea-international">synthea-international</a>'s <code class="language-plaintext highlighter-rouge">ca/</code> first on the classpath.</p>
+
+<h1 id="how-this-was-tested-31-oct-2026">How this was tested (31 Oct 2026)</h1>
+
+<div class="table-wrap">
+<table><thead><tr><th>Tool</th><th>Version</th><th>What we ran</th></tr></thead><tbody>
+<tr><td>HAPI FHIR server</td><td><code class="language-plaintext highlighter-rouge">hapiproject/hapi:latest</code> (8.12.0), Oct 2026</td><td>Kata target; plain POST vs. conditional PUT; the labs for weeks 0 and 2–6</td></tr>
+<tr><td>Open Integration Engine</td><td>4.5.2</td><td>MLLP channel deployed via its REST API; ACK behaviour; one compose file with HAPI and the week 3 bridge</td></tr>
+<tr><td>FHIR validator</td><td>7.0.3</td><td>US Core 9.0.0; CA Baseline 1.1.0 and 1.2.0</td></tr>
+<tr><td>Synthea</td><td>Master build, Oct 2026, plus synthea-international <code class="language-plaintext highlighter-rouge">ca/</code></td><td>US and Ontario patients</td></tr>
+<tr><td>Libraries</td><td>HAPI FHIR 8.2.0, HAPI HL7v2 2.6.0, Firely 6.8.0, fhirclient 4.4.0 and 3.0.1, python-hl7 0.4.5 (on OpenJDK 25, .NET 8, Node 20, Python 3.12)</td><td>The four katas and their extras</td></tr>
+</tbody></table>
+</div>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

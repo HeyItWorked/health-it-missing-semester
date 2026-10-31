@@ -1,0 +1,51 @@
+Health IT Missing Semester
+Copyright (c) 2026 HeyItWorked. All rights reserved.
+
+1. Course content (proprietary)
+
+The course content in this repository and on the published site belongs to
+HeyItWorked. It includes the text of every HTML page, the tables and diagrams,
+static/css/health-it.css, and everything under static/files/ (lab code,
+scripts, sample messages and data).
+
+You may read the content and run the lab code on your own computer for your
+own study. You may not copy, republish, adapt, translate, sell, sublicense or
+otherwise distribute the course content, in whole or in part, or use it as
+training data for machine-learning models, without prior written permission
+from the copyright holder. To ask for permission, open an issue at
+https://github.com/HeyItWorked/health-it-missing-semester.
+
+GitHub's terms of service let other GitHub users view and fork a public
+repository on GitHub. That does not grant any other right in the course
+content.
+
+2. Site design (third-party, CC BY-NC-SA 4.0)
+
+The site design is adapted from "The Missing Semester of Your CS Education"
+by Anish, Jon and Jose at MIT (https://missing.csail.mit.edu/, source at
+https://github.com/missing-semester/missing-semester), licensed under the
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+license (https://creativecommons.org/licenses/by-nc-sa/4.0/). The adapted
+parts are:
+
+  - static/css/main.css ("Copyright (c) 2017 Anish Athalye"); changed to load
+    the bundled fonts instead of Google Fonts
+  - static/css/syntax.css; unchanged
+  - static/js/sidenotes.js; changed to place the margin notes again after the
+    fonts load
+  - the page layout shared by every HTML page: the head, navigation bar,
+    content container and footer markup
+
+These adapted parts are licensed under CC BY-NC-SA 4.0, not under section 1.
+The original site's analytics were removed.
+
+3. Fonts (third-party, SIL Open Font License 1.1)
+
+static/fonts/ contains Source Sans Pro and Source Code Pro, (c) Adobe, with
+Reserved Font Name 'Source', under the SIL Open Font License 1.1. See
+static/fonts/OFL.txt.
+
+4. Trademarks
+
+HL7, FHIR, LOINC, SNOMED CT and other product and standard names belong to
+their owners.

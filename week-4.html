@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 4 of the Health IT Missing Semester: FHIR APIs.">
+
+  <title>FHIR APIs &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">FHIR APIs</h1>
+<h2 class="subtitle">Week 4 · ~10 h (SMART often runs over)</h2>
+
+<p>FHIR is the API layer apps, payers and data-sharing rules build on: US
+certified EHRs must offer FHIR APIs, and Canada's national profiles are FHIR R4
+too. When a patient's phone shows last month's lab results, or a clinician's
+screen shows a warning card from a service the hospital bought, a FHIR request
+was made somewhere. When those requests are careless, the failures are quiet.
+An app that reads only the first page of a search shows twenty labs out of two
+thousand and looks fine. An app that asks for every scope holds far more of
+someone's record than it needs. A feed that never checks its output against
+the national profile hands the next system data it can't use.</p>
+
+<p>Week 0 taught read, search and conditional update. This week we ask better
+questions and check the answers. We load ten synthetic patients into a FHIR
+server and search them properly: chains, includes, paging and bulk export. We
+separate <em>what</em> data must be exchangeable from <em>how</em> it is
+shaped, and validate resources against the US and Canadian profiles, by hand
+and as a CI gate. Then we look at the two standards that let outside software
+into the clinical workflow: SMART on FHIR, which lets an app act for a user,
+and CDS Hooks, which lets a service speak up while a clinician is looking at a
+chart.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab:
+HAPI FHIR 8.12.0 in Docker, Synthea (master build of 21 Oct 2026), the HL7
+FHIR validator 7.0.3 on OpenJDK 25, Node 20 with fhirclient 3.0.1, Python 3.12
+and jq 1.7, plus the public SMART launcher sandbox. The outputs are copied from
+one run of the lab script. Yours will differ in server ids, timestamps and
+random values.</p>
+
+<h1 id="a-server-with-patients-in-it">A server with patients in it</h1>
+
+<p>Searching an empty server teaches nothing, so we generate ten patients with
+Synthea and load them into HAPI. Synthea writes one transaction Bundle per
+patient, plus two shared Bundles: the hospitals
+(<code class="language-plaintext highlighter-rouge">hospitalInformation…</code>) and the clinicians
+(<code class="language-plaintext highlighter-rouge">practitionerInformation…</code>). Order matters. Patient Bundles point
+at their doctors with conditional references such as
+<code class="language-plaintext highlighter-rouge">Practitioner?identifier=…|9999966796</code>, which the server resolves
+while it processes the transaction. Load a patient first and there is nothing
+to resolve:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span>-p<span class="w"> </span><span class="m">10</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span>Massachusetts<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span>--<span class="w"> </span><span class="s1">' -- |^Records'</span>
+<span class="go">SLF4J: No SLF4J providers were found.</span>
+<span class="go">SLF4J: Defaulting to no-operation (NOP) logger implementation</span>
+<span class="go">SLF4J: See http://www.slf4j.org/codes.html#noProviders for further details.</span>
+<span class="go">9 -- Jody426 Hickle134 (8 y/o M) Newburyport, Massachusetts  (11454)</span>
+<span class="go">7 -- Wallace647 Effertz744 (16 y/o M) Revere, Massachusetts  (22632)</span>
+<span class="go">2 -- Wilfredo622 Fritsch593 (15 y/o M) Whitman, Massachusetts  (20437)</span>
+<span class="go">8 -- Lindsay928 Zieme486 (19 y/o F) Worcester, Massachusetts  (25091)</span>
+<span class="go">3 -- Ezekiel373 Walter473 (27 y/o M) Watertown, Massachusetts  (37347)</span>
+<span class="go">4 -- Shalanda398 Kelsie51 Jenkins714 (30 y/o F) Lowell, Massachusetts  (42162)</span>
+<span class="go">6 -- Tennille443 Denna536 Trantow673 (66 y/o F) Arlington, Massachusetts  (91437)</span>
+<span class="go">5 -- Jona712 Bonnie873 Gibson10 (67 y/o F) Peabody, Massachusetts  (99680)</span>
+<span class="go">10 -- Cristobal567 Montero62 (79 y/o M) Saugus, Massachusetts  (109553)</span>
+<span class="go">1 -- Corie618 Sofia418 Beahan375 (101 y/o F) Franklin, Massachusetts  (153177)</span>
+<span class="go">Records: total=10, alive=10, dead=0</span>
+<span class="gp">$ </span>ls<span class="w"> </span>output/fhir<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>Information
+<span class="go">hospitalInformation1793485472870.json</span>
+<span class="go">practitionerInformation1793485472870.json</span>
+<span class="gp">$ </span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>hapi<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-e<span class="w"> </span><span class="nv">HAPI_FHIR_BULK_EXPORT_ENABLED</span><span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>hapiproject/hapi:latest<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-c1-12
+<span class="go">af61d1130e3e</span>
+<span class="gp">$ </span><span class="nv">F</span><span class="o">=</span>localhost:8080/fhir
+<span class="gp">$ </span>timeout<span class="w"> </span><span class="m">120</span><span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="err">'</span><span class="k">until</span><span class="w"> </span>curl<span class="w"> </span>-sfo<span class="w"> </span>/dev/null<span class="w"> </span><span class="nv">$0</span>/metadata<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  sleep 2; done' $F || exit 1</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="nv">$F</span>/metadata<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span>.software
+<span class="go">{"name":"HAPI FHIR Server","version":"8.12.0"}</span>
+<span class="gp">$ </span>post<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@<span class="s2">"</span><span class="nv">$1</span><span class="s2">"</span><span class="w"> </span><span class="nv">$F</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="gp">$ </span>post<span class="w"> </span>output/fhir/Jody426_*.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.issue[].diagnostics'</span>
+<span class="go">HAPI-1091: Invalid match URL "Practitioner?identifier=http://hl7.org/fhir/sid/us-npi|9999966796" - No resources match this search</span>
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>output/fhir/*Information*.json<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  post $f | jq -r .type; done</span>
+<span class="go">batch-response</span>
+<span class="go">batch-response</span>
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>output/fhir/<span class="o">[</span>A-Z<span class="o">]</span>*.json<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  post $f | jq -r .type; done | uniq -c</span>
+<span class="go">     10 transaction-response</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?_summary=count"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">10</span>
+</code></pre></div></div>
+
+<p>HAPI rejected the whole transaction (<code class="language-plaintext highlighter-rouge">HAPI-1091</code>) and wrote
+nothing: a transaction is all or none. The two shared Bundles are batches, so
+they came back as <code class="language-plaintext highlighter-rouge">batch-response</code>, and after them every patient
+Bundle loaded.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> we enabled bulk export with
+  <code class="language-plaintext highlighter-rouge">HAPI_FHIR_BULK_EXPORT_ENABLED=true</code>. Without it, this image
+  answered <code class="language-plaintext highlighter-rouge">$export</code> with a 400 and an OperationOutcome saying it
+  didn't know the operation. Lab servers often ship with optional operations
+  off; check <code class="language-plaintext highlighter-rouge">/metadata</code> before you blame your client.</p>
+</blockquote>
+
+<h1 id="search">Search</h1>
+
+<p>A FHIR search is a GET on a resource type with parameters, and the answer is
+a Bundle of type <code class="language-plaintext highlighter-rouge">searchset</code>. Three parts of that Bundle matter as
+much as the resources inside it: <code class="language-plaintext highlighter-rouge">total</code>, how many matched;
+<code class="language-plaintext highlighter-rouge">entry</code>, the ones on this page; and <code class="language-plaintext highlighter-rouge">link</code>, where to go
+next. <code class="language-plaintext highlighter-rouge">_count</code> asks for a page size, and <code class="language-plaintext highlighter-rouge">_elements</code>
+trims each resource so we can read the output:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">F</span><span class="o">=</span>localhost:8080/fhir
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?_count=3&amp;_elements=name"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="err">'</span><span class="o">{</span>total,
+<span class="go">  link: [.link[] | {relation, url}],</span>
+<span class="go">  names: [.entry[].resource.name[0].family]}'</span>
+<span class="go">{</span>
+<span class="go">  "total": 10,</span>
+<span class="go">  "link": [</span>
+<span class="go">    {</span>
+<span class="go">      "relation": "self",</span>
+<span class="go">      "url": "http://localhost:8080/fhir/Patient?_count=3&amp;_elements=name"</span>
+<span class="go">    },</span>
+<span class="go">    {</span>
+<span class="go">      "relation": "next",</span>
+<span class="go">      "url": "http://localhost:8080/fhir?_getpages=9643061b-8b3d-45f3-9e0a-95603c92abd6&amp;_getpagesoffset=3&amp;_count=3&amp;_pretty=true&amp;_bundletype=searchset&amp;_elements=name"</span>
+<span class="go">    }</span>
+<span class="go">  ],</span>
+<span class="go">  "names": [</span>
+<span class="go">    "Beahan375",</span>
+<span class="go">    "Montero62",</span>
+<span class="go">    "Walter473"</span>
+<span class="go">  ]</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">pid</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?name=Beahan375"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -r '.entry[0].resource.id'); echo $pid</span>
+<span class="go">1592</span>
+<span class="gp">$ </span><span class="nv">q</span><span class="o">=</span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Observation?patient=</span><span class="nv">$pid</span><span class="s2">&amp;category=laboratory"</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$q</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'{total, entries: (.entry | length)}'</span>
+<span class="go">{</span>
+<span class="go">  "total": null,</span>
+<span class="go">  "entries": 20</span>
+<span class="go">}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$q</span><span class="s2">&amp;_total=accurate"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">2067</span>
+<span class="gp">$ </span>./fetch-all.sh<span class="w"> </span><span class="s2">"</span><span class="nv">$q</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>wc<span class="w"> </span>-l
+<span class="go">2067</span>
+<span class="gp">$ </span>./fetch-all.sh<span class="w"> </span><span class="s2">"</span><span class="nv">$q</span><span class="s2">&amp;_count=500"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.code.text<span class="w"> </span><span class="p">|</span>
+<span class="go">  sort | uniq -c | sort -rn | head -5</span>
+<span class="go">     65 Hemoglobin A1c/Hemoglobin.total in Blood</span>
+<span class="go">     60 Urea nitrogen [Mass/volume] in Serum or Plasma</span>
+<span class="go">     60 Specific gravity of Urine by Test strip</span>
+<span class="go">     60 Sodium [Moles/volume] in Serum or Plasma</span>
+<span class="go">     60 Protein [Presence] in Urine by Test strip</span>
+</code></pre></div></div>
+
+<h2 id="following-the-next-link">Following the next link</h2>
+
+<p>The first query matched ten patients and returned three. The
+<code class="language-plaintext highlighter-rouge">next</code> link is not our query with an offset: HAPI stored the result
+set and handed us a <code class="language-plaintext highlighter-rouge">_getpages</code> id. Treat paging links as opaque;
+follow them, don't build them.</p>
+
+<p>Then the trap. Corie, the 101-year-old, has 2,067 laboratory Observations.
+The plain search returned 20 of them, and <code class="language-plaintext highlighter-rouge">total</code> was
+<code class="language-plaintext highlighter-rouge">null</code>: HAPI hadn't counted yet and left it out, which the spec
+allows. Nothing in the response is an error. An app that renders
+<code class="language-plaintext highlighter-rouge">entry</code> and stops has just told a clinician that this patient's lab
+history is twenty results long. <code class="language-plaintext highlighter-rouge">_total=accurate</code> made the server
+count. The spec is explicit that page size is a request: servers <a
+href="https://hl7.org/fhir/R4/search.html">“SHALL NOT return more resources
+than requested … but may return less”</a>. The only correct client follows
+<code class="language-plaintext highlighter-rouge">next</code> until there is none. Ours is ten lines of shell:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Print every resource a FHIR search matches, one JSON per line,</span>
+<span class="c1"># following Bundle.link "next" until the server stops sending one.</span>
+<span class="nv">url</span><span class="o">=</span><span class="nv">$1</span>
+<span class="k">while</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$url</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">page</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$url</span><span class="s2">"</span><span class="k">)</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s\n'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$page</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.entry[]?.resource'</span>
+<span class="w">  </span><span class="nv">url</span><span class="o">=</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s\n'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$page</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span>
+<span class="w">        </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.link[]? | select(.relation == "next") | .url'</span><span class="k">)</span>
+<span class="k">done</span>
+</code></pre></div></div>
+
+<p>It returned all 2,067. With <code class="language-plaintext highlighter-rouge">_count=500</code> the same loop needed 5
+round trips instead of 104, and once you have every page you can ask questions
+like which tests dominate the record.</p>
+
+<h2 id="chained-parameters">Chained parameters</h2>
+
+<p>Often what you know isn't on the resource you want. You want Observations,
+but you know the patient's name or birth date, which live on Patient. A
+<em>chained</em> parameter follows a reference inside the search:
+<code class="language-plaintext highlighter-rouge">subject:Patient.name=Beahan375</code> means “Observations whose subject
+is a Patient whose name matches Beahan375”. <code class="language-plaintext highlighter-rouge">_has</code> goes the other
+way: Patients pointed at by a Condition with a given code. Each replaces a
+loop of requests in your code with one the server can plan:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-sG<span class="w"> </span><span class="nv">$F</span>/Observation<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="s1">'subject:Patient.name=Beahan375'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="s1">'code=http://loinc.org|4548-4'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">_summary</span><span class="o">=</span>count<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">65</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-sG<span class="w"> </span><span class="nv">$F</span>/Observation<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="s1">'patient.birthdate=lt1960-01-01'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="s1">'code=http://loinc.org|4548-4'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">_summary</span><span class="o">=</span>count<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">76</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-sG<span class="w"> </span><span class="nv">$F</span>/Patient<span class="w"> </span>-d<span class="w"> </span><span class="nv">_elements</span><span class="o">=</span>name<span class="w"> </span>--data-urlencode<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'_has:Condition:patient:code=http://snomed.info/sct|59621000'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[].resource.name[0].family'</span>
+<span class="go">Beahan375</span>
+<span class="go">Gibson10</span>
+</code></pre></div></div>
+
+<p>One patient's HbA1c results (LOINC <code class="language-plaintext highlighter-rouge">4548-4</code>), the same for
+everyone born before 1960, and the patients with essential hypertension
+(SNOMED CT <code class="language-plaintext highlighter-rouge">59621000</code>). <code class="language-plaintext highlighter-rouge">curl -G --data-urlencode</code>
+encodes the <code class="language-plaintext highlighter-rouge">|</code> between system and code; hand-built URLs break
+there. In production, chain on <code class="language-plaintext highlighter-rouge">subject:Patient.identifier=system|value</code>,
+not names: as in week 3, identity is an identifier with a system. And the
+server decides which chains it supports. Its CapabilityStatement lists the
+search parameters, and a server may ignore one it doesn't know, so check the
+<code class="language-plaintext highlighter-rouge">self</code> link to see what was applied.</p>
+
+<h2 id="include-and-revinclude"><code class="language-plaintext highlighter-rouge">_include</code> and <code class="language-plaintext highlighter-rouge">_revinclude</code></h2>
+
+<p>A medication list needs the prescriber's name. Fetching each Practitioner is
+one request per row; instead, ask the server to include referenced resources in
+the same Bundle. <code class="language-plaintext highlighter-rouge">_include</code> follows references out of the matches,
+<code class="language-plaintext highlighter-rouge">_revinclude</code> pulls in resources that point back at them:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>modes<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  "\(.search.mode) \(.resource.resourceType)"' | sort | uniq -c; }</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/MedicationRequest?patient=</span><span class="nv">$pid</span><span class="s2">&amp;_count=5\</span>
+<span class="s2">&amp;_include=MedicationRequest:requester"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>modes
+<span class="go">      1 include Practitioner</span>
+<span class="go">      5 match MedicationRequest</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?_id=</span><span class="nv">$pid</span><span class="s2">&amp;_revinclude=Condition:patient"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  tee rev.json | modes</span>
+<span class="go">    141 include Condition</span>
+<span class="go">      1 match Patient</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.total'</span><span class="w"> </span>rev.json
+<span class="go">1</span>
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">search.mode</code> says why each entry is there: <code class="language-plaintext highlighter-rouge">match</code> or
+<code class="language-plaintext highlighter-rouge">include</code>. Five orders by one clinician brought one Practitioner:
+includes are deduplicated. The reverse include returned one Patient and 141
+Conditions, and <code class="language-plaintext highlighter-rouge">total</code> still says 1, because it counts matches
+only. Never compute “how many results” by counting entries. And ask only for
+what the screen shows: a <code class="language-plaintext highlighter-rouge">_revinclude</code> on a long-lived patient can
+be huge.</p>
+
+<h2 id="bulk-export">Bulk export</h2>
+
+<p>Analytics, payers and quality reporting need everything, and paging through
+a population would take hours and pin the server. The Bulk Data Access
+specification defines <code class="language-plaintext highlighter-rouge">$export</code>: kick off a job, poll a status URL,
+and download newline-delimited JSON (one resource per line) when it's
+ready:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">poll</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span>-D<span class="w"> </span>-<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'Accept: application/fhir+json'</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Prefer: respond-async'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/\$export?_type=Patient,Condition"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  tr -d '\r' | awk '/^Content-Location/ {print $2}')</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$poll</span><span class="s2">"</span>
+<span class="gp">http://localhost:8080/fhir/$</span>export-poll-status?_jobId<span class="o">=</span>0f43f53e-c229-450f-b62d-36903317b4b6
+<span class="gp">$ </span>timeout<span class="w"> </span><span class="m">120</span><span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="s1">'until [ "$(curl -s -o manifest.json \</span>
+<span class="s1">  -w %{http_code} "$0")" = 200 ]; do sleep 5; done'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$poll</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="o">||</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.requiresAccessToken, .output[]'</span><span class="w"> </span>manifest.json
+<span class="go">true</span>
+<span class="go">{"type":"Condition","url":"http://localhost:8080/fhir/Binary/IraLynOtJr7d8AWHQGJvRK7PeWTiJgaR"}</span>
+<span class="go">{"type":"Patient","url":"http://localhost:8080/fhir/Binary/2c5ZIcoSjGjUnl04aAlYf0Dcu2fP7MLV"}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.output[] | "\(.type) \(.url)"'</span><span class="w"> </span>manifest.json<span class="w"> </span><span class="p">|</span>
+<span class="go">  while read t u; do echo "$t $(curl -s "$u" | wc -l)"; done</span>
+<span class="go">Condition 408</span>
+<span class="go">Patient 10</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.output[] | select(.type == "Patient") | .url'</span><span class="w"> </span>manifest.json<span class="w"> </span><span class="p">|</span>
+<span class="go">  xargs curl -s | head -1 | jq -c '{resourceType, id, gender}'</span>
+<span class="go">{"resourceType":"Patient","id":"1592","gender":"female"}</span>
+</code></pre></div></div>
+
+<p>The kick-off returned a <code class="language-plaintext highlighter-rouge">Content-Location</code> to poll; we polled
+until the status was 200 and saved the manifest, which lists one file
+per resource type. Note <code class="language-plaintext highlighter-rouge">requiresAccessToken: true</code>. In production
+each of these calls carries a token from SMART Backend Services (an app
+authenticating as itself, with no user), and the files are as sensitive as
+the EHR. Our lab server has no authentication, which is fine for synthetic
+data and nothing else.</p>
+
+<h1 id="what-versus-how">What versus how</h1>
+
+<p>Base FHIR is deliberately loose: almost every element is optional, codes can
+come from any system, and extensions can carry anything. That's why FHIR fits
+every country, and why two systems that both “speak FHIR” can still fail to
+understand each other. Countries fix this in two layers.</p>
+
+<p>The first says <em>what</em> must be exchangeable, in plain terms:
+demographics, problems, medications, allergies, lab results, vital signs,
+notes. In the US that is USCDI, the United States Core Data for
+Interoperability; in Canada, CACDI, the Canadian Core Data for
+Interoperability, published by CIHI. Neither says anything about JSON.</p>
+
+<p>The second says <em>how</em> those elements look in FHIR: profiles that make
+elements required, bind them to value sets and define extensions. US Core is
+<a href="https://hl7.org/fhir/us/core/">“updated annually to support the latest
+requirements”</a> of USCDI. In Canada, CA Baseline is the national starting
+point, and CA Core+, the guide aligned with CACDI, is still a draft.</p>
+
+<div class="table-wrap">
+<table><thead><tr><th></th><th>United States</th><th>Canada</th></tr></thead><tbody>
+<tr><td>What must be exchangeable</td><td>USCDI (ONC/ASTP)</td><td>CACDI (CIHI)</td></tr>
+<tr><td>How, in FHIR R4</td><td>US Core (9.0.0 is current)</td><td>CA Baseline (1.2.0 here); CA Core+ (draft)</td></tr>
+<tr><td>Validator package</td><td><code class="language-plaintext highlighter-rouge">hl7.fhir.us.core</code></td><td><code class="language-plaintext highlighter-rouge">hl7.fhir.ca.baseline</code></td></tr>
+<tr><td>Patient profile</td><td><code class="language-plaintext highlighter-rouge">us-core-patient</code></td><td><code class="language-plaintext highlighter-rouge">profile-patient</code></td></tr>
+</tbody></table>
+</div>
+
+<blockquote>
+  <p><strong>Canada:</strong> CA Baseline is deliberately light; provincial
+  guides add their own rules on top. CA Core+ is published as a draft for early
+  implementers, so pin the version you test against and expect changes. Our
+  validator picked CA Baseline 1.2.0 when we didn't name a version.</p>
+</blockquote>
+
+<h1 id="validation">Validation</h1>
+
+<p>A profile is only useful if something checks it. The reference tool is the
+HL7 FHIR validator, one Java jar. Give it resources, a FHIR version, one or
+more implementation guides (<code class="language-plaintext highlighter-rouge">-ig</code>, downloaded as packages into
+<code class="language-plaintext highlighter-rouge">~/.fhir</code>) and a profile. It checks codes against value sets too,
+asking the terminology server at <code class="language-plaintext highlighter-rouge">tx.fhir.org</code> about ones it can't
+resolve locally, so it needs the network.</p>
+
+<h2 id="synthea-against-us-core">Synthea against US Core</h2>
+
+<p>Synthea's Patient claims, in <code class="language-plaintext highlighter-rouge">meta.profile</code>, to be a US Core
+Patient. Let's hold it to that:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.entry[0].resource'</span><span class="w"> </span>output/fhir/Corie618_*.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;<span class="w"> </span>synthea-patient.json
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.meta, [.extension[].url | split("/")[-1]]'</span><span class="w"> </span>synthea-patient.json
+<span class="go">{"profile":["http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"]}</span>
+<span class="go">["us-core-race","us-core-ethnicity","patient-mothersMaidenName","us-core-birthsex","patient-birthPlace","disability-adjusted-life-years","quality-adjusted-life-years"]</span>
+<span class="gp">$ </span><span class="nv">US</span><span class="o">=</span>http://hl7.org/fhir/us/core/StructureDefinition
+<span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span>synthea-patient.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span>-ig<span class="w"> </span>hl7.fhir.us.core#9.0.0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-profile<span class="w"> </span><span class="nv">$US</span>/us-core-patient<span class="w"> </span>&gt;<span class="w"> </span>us.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">exit 1</span>
+<span class="gp">$ </span>head<span class="w"> </span>-1<span class="w"> </span>us.log<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-c1-58
+<span class="go">FHIR Validation tool Version 7.0.3 (Git# 28e9fac6d79d). Bu</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^\*FAIL|^Success|(Error|Warning) @'</span><span class="w"> </span>us.log<span class="w"> </span><span class="p">|</span>
+<span class="go">  sed 's/, validating against.*//'</span>
+<span class="go">*FAILURE*: 2 errors, 2 warnings, 5 notes</span>
+<span class="go">  Error @ Patient.extension[5] (line 64, col6): The extension http://synthetichealth.github.io/synthea/disability-adjusted-life-years could not be found so is not allowed here</span>
+<span class="go">  Error @ Patient.extension[6] (line 68, col6): The extension http://synthetichealth.github.io/synthea/quality-adjusted-life-years could not be found so is not allowed here</span>
+<span class="go">  Warning @ Patient.identifier[2].type (line 93, col8): None of the codings provided are in the value set 'IdentifierType' (http://hl7.org/fhir/ValueSet/identifier-type|4.0.1), and a coding should come from this value set unless it has no suitable code (note that the validator cannot judge what is suitable) (codes = http://terminology.hl7.org/CodeSystem/v2-0203#SS)</span>
+<span class="go">  Warning @ Patient.communication[0].language (line 207, col8): None of the codings provided are in the value set 'Languages' (http://terminology.hl7.org/ValueSet/Languages|1.0.0), and a coding should come from this value set unless it has no suitable code (note that the validator cannot judge what is suitable) (codes = urn:ietf:bcp:47#en-US)</span>
+</code></pre></div></div>
+
+<p>Two errors of one kind. Synthea adds two extensions of its own,
+disability-adjusted and quality-adjusted life years (DALY and QALY). Their URLs
+point at <code class="language-plaintext highlighter-rouge">synthetichealth.github.io</code>, no loaded package defines
+them, and an extension the validator can't find is an error. US Core isn't
+what's failing; Synthea's private additions are. Fix it where the data is
+produced: drop the extensions before sending, or publish definitions for them
+in a package of your own.</p>
+
+<p>The warnings need explaining too, since “every Synthea error is explained”
+is this week's bar, and a stricter profile can turn a warning into an error.
+The Social Security number's identifier type <code class="language-plaintext highlighter-rouge">SS</code> isn't in the base
+<code class="language-plaintext highlighter-rouge">IdentifierType</code> value set, and <code class="language-plaintext highlighter-rouge">en-US</code> wasn't matched in
+the <code class="language-plaintext highlighter-rouge">Languages</code> value set. Both bindings are weaker than required,
+so they warn. The notes (not shown) are extensions that match no slice the
+profile names, which is normal.</p>
+
+<h2 id="synthea-against-ca-baseline">Synthea and a minimal patient against CA Baseline</h2>
+
+<p>The Canadian profile is <code class="language-plaintext highlighter-rouge">profile-patient</code> in package
+<code class="language-plaintext highlighter-rouge">hl7.fhir.ca.baseline</code>. We validate the Synthea patient and a
+minimal hand-written one, then the minimal one again with a flag:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">P</span><span class="o">=</span>http://hl7.org/fhir/ca/baseline/StructureDefinition
+<span class="gp">$ </span>cat<span class="w"> </span>minimal-patient.json
+<span class="go">{</span>
+<span class="go">  "resourceType": "Patient",</span>
+<span class="go">  "identifier": [{</span>
+<span class="go">    "system": "https://genhosp.example.org/mrn",</span>
+<span class="go">    "value": "100901"</span>
+<span class="go">  }],</span>
+<span class="go">  "name": [{"family": "Tremblay", "given": ["Marie"]}],</span>
+<span class="go">  "gender": "female",</span>
+<span class="go">  "birthDate": "1975-06-02"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span>synthea-patient.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>minimal-patient.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span>-ig<span class="w"> </span>hl7.fhir.ca.baseline<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-profile<span class="w"> </span><span class="nv">$P</span>/profile-patient<span class="w"> </span>&gt;<span class="w"> </span>ca.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">exit 1</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-o<span class="w"> </span><span class="s1">'hl7.fhir.ca.baseline#[0-9.]*'</span><span class="w"> </span>ca.log<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-u
+<span class="go">hl7.fhir.ca.baseline#1.2.0</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^-- |^\*FAIL|^Success|Error @'</span><span class="w"> </span>ca.log<span class="w"> </span><span class="p">|</span>
+<span class="go">  sed 's/, validating against.*//'</span>
+<span class="go">-- synthea-patient.json ----------------------------------------</span>
+<span class="go">*FAILURE*: 2 errors, 2 warnings, 18 notes</span>
+<span class="go">  Error @ Patient.extension[5] (line 64, col6): The extension http://synthetichealth.github.io/synthea/disability-adjusted-life-years could not be found so is not allowed here</span>
+<span class="go">  Error @ Patient.extension[6] (line 68, col6): The extension http://synthetichealth.github.io/synthea/quality-adjusted-life-years could not be found so is not allowed here</span>
+<span class="go">-- minimal-patient.json ----------------------------------------</span>
+<span class="go">*FAILURE*: 1 errors, 1 warnings, 1 notes</span>
+<span class="go">  Error @ Patient.identifier[0].system (line 4, col48): Example URLs are not allowed in this context (https://genhosp.example.org/mrn)</span>
+<span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span>minimal-patient.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span>-ig<span class="w"> </span>hl7.fhir.ca.baseline<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-profile<span class="w"> </span><span class="nv">$P</span>/profile-patient<span class="w"> </span>-allow-example-urls<span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;<span class="w"> </span>ca2.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">exit 0</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^\*FAIL|^Success|(Error|Warning) @'</span><span class="w"> </span>ca2.log<span class="w"> </span><span class="p">|</span>
+<span class="go">  sed 's/, validating against.*//'</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">  Warning @ Patient (line 1, col2): Constraint failed: dom-6: 'A resource should have narrative for robust management' (defined in http://hl7.org/fhir/StructureDefinition/DomainResource) (Best Practice Recommendation)</span>
+</code></pre></div></div>
+
+<p>Synthea fails on the same two extensions. The validator also checked it
+against US Core, because the resource still claims that profile: you're
+validated against what you claim, not only what you ask for.</p>
+
+<p>The minimal patient failed for a different reason. Its identifier system is
+<code class="language-plaintext highlighter-rouge">https://genhosp.example.org/mrn</code>, and the validator refuses example
+URLs unless you pass <code class="language-plaintext highlighter-rouge">-allow-example-urls true</code>. With the flag it
+passes, with one best-practice warning (<code class="language-plaintext highlighter-rouge">dom-6</code>: no narrative).
+That refusal is a feature: a production record whose identifier system is an
+example domain is a bug, and a Canadian health card number should carry its
+province's registered system URI. Every sample in this course uses
+<code class="language-plaintext highlighter-rouge">example.org</code> on purpose, so our test runs need the flag; production
+runs must not.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> Synthea's own output fails both US Core and CA
+  Baseline on its custom extensions; a minimal CA Baseline patient passes.
+  Re-run on 31 Oct 2026 (validator 7.0.3, US Core 9.0.0, CA Baseline 1.2.0):
+  2 errors (DALY/QALY) against both, and the minimal patient passed only with
+  <code class="language-plaintext highlighter-rouge">-allow-example-urls true</code>, because its MRN system is an
+  <code class="language-plaintext highlighter-rouge">example.org</code> URL.</p>
+</blockquote>
+
+<h2 id="the-bridges-output">The week 3 bridge's output</h2>
+
+<p>Week 3's bridge maps ADT messages to Patients in <code class="language-plaintext highlighter-rouge">to_patient</code>,
+which doesn't need the network. We call it on every week 3 sample message and
+validate what it would have written:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>python3<span class="w"> </span>make-patients.py<span class="w"> </span>adt*.hl7
+<span class="go">adt-a01-late.hl7: wrote out/adt-a01-late.json</span>
+<span class="go">adt-a08-first.hl7: wrote out/adt-a08-first.json</span>
+<span class="go">adt-amp.hl7: wrote out/adt-amp.json</span>
+<span class="go">adt-baddob.hl7: rejected AE 102^Data type error^HL70357</span>
+<span class="go">adt-dupe.hl7: wrote out/adt-dupe.json</span>
+<span class="go">adt.hl7: wrote out/adt.json</span>
+<span class="go">adt-newctl.hl7: wrote out/adt-newctl.json</span>
+<span class="go">adt-nomrn.hl7: rejected AE 101^Required field missing^HL70357</span>
+<span class="go">adt-on.hl7: wrote out/adt-on.json</span>
+<span class="go">adt-prod.hl7: rejected AR 202^Unsupported processing id^HL70357</span>
+<span class="go">adt-zseg.hl7: wrote out/adt-zseg.json</span>
+<span class="gp">$ </span>cat<span class="w"> </span>out/adt.json
+<span class="go">{</span>
+<span class="go">  "resourceType": "Patient",</span>
+<span class="go">  "identifier": [</span>
+<span class="go">    {</span>
+<span class="go">      "system": "https://genhosp.example.org/mrn",</span>
+<span class="go">      "value": "100234"</span>
+<span class="go">    }</span>
+<span class="go">  ],</span>
+<span class="go">  "active": true,</span>
+<span class="go">  "name": [</span>
+<span class="go">    {</span>
+<span class="go">      "family": "DOE",</span>
+<span class="go">      "given": [</span>
+<span class="go">        "JANE"</span>
+<span class="go">      ]</span>
+<span class="go">    }</span>
+<span class="go">  ],</span>
+<span class="go">  "gender": "female",</span>
+<span class="go">  "birthDate": "1980-02-14"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span>out/*.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span>-ig<span class="w"> </span>hl7.fhir.us.core#9.0.0<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-profile<span class="w"> </span><span class="nv">$US</span>/us-core-patient<span class="w"> </span>-allow-example-urls<span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;<span class="w"> </span>bridge-us.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">exit 0</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-cE<span class="w"> </span><span class="s1">'^Success: 0 errors'</span><span class="w"> </span>bridge-us.log
+<span class="go">8</span>
+</code></pre></div></div>
+
+<p>Three messages were rejected, as the bridge rejects them on the wire (bad
+birth date, missing MRN, production message on a test listener). The other
+eight Patients pass US Core with zero errors, because the bridge already writes
+the <code class="language-plaintext highlighter-rouge">identifier</code>, <code class="language-plaintext highlighter-rouge">name</code> and <code class="language-plaintext highlighter-rouge">gender</code> US Core
+requires. One gap validation can't see: the Ontario sample's health card
+number (the <code class="language-plaintext highlighter-rouge">JHN</code> repetition) never reaches the Patient. A profile
+can't tell you that dropped data mattered; your mapping tests have to.</p>
+
+<h2 id="validation-in-ci">Validation in CI</h2>
+
+<p>Validation you run by hand stops the week you get busy, so put it in CI. The
+validator does the hard part: it exits non-zero when any file has an error,
+and CI fails a step on a non-zero exit. Our gate is a short script:</p>
+
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># CI gate: validate FHIR Patients against CA Baseline.</span>
+<span class="c1"># The validator exits non-zero if any file has an error, and</span>
+<span class="c1"># set -e passes that on, so the CI job fails.</span>
+<span class="nb">set</span><span class="w"> </span>-e
+<span class="nv">P</span><span class="o">=</span>http://hl7.org/fhir/ca/baseline/StructureDefinition
+java<span class="w"> </span>-jar<span class="w"> </span>validator_cli.jar<span class="w"> </span><span class="s2">"</span><span class="nv">$@</span><span class="s2">"</span><span class="w"> </span>-version<span class="w"> </span><span class="m">4</span>.0.1<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-ig<span class="w"> </span>hl7.fhir.ca.baseline#1.2.0<span class="w"> </span>-profile<span class="w"> </span><span class="nv">$P</span>/profile-patient<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-allow-example-urls<span class="w"> </span><span class="nb">true</span><span class="w"> </span>&gt;<span class="w"> </span>validation.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^-- |^\*FAILURE|Error @'</span><span class="w"> </span>validation.log
+<span class="w">  </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
+<span class="o">}</span>
+grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^-- |^Success'</span><span class="w"> </span>validation.log
+</code></pre></div></div>
+
+<p>Here it passes, and then fails after we simulate a mapping regression:
+someone drops the gender table and writes the HL7 v2 code <code class="language-plaintext highlighter-rouge">F</code>
+straight into FHIR.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>./ci-validate.sh<span class="w"> </span>out/*.json<span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">-- out/adt-a01-late.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-a08-first.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-amp.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-dupe.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-newctl.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-on.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">-- out/adt-zseg.json ----------------------------------------</span>
+<span class="go">Success: 0 errors, 1 warnings, 1 notes</span>
+<span class="go">exit 0</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.gender = "F"'</span><span class="w"> </span>out/adt.json<span class="w"> </span>&gt;<span class="w"> </span>out/regression.json
+<span class="gp">$ </span>./ci-validate.sh<span class="w"> </span>out/*.json<span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">-- out/adt-a01-late.json ----------------------------------------</span>
+<span class="go">-- out/adt-a08-first.json ----------------------------------------</span>
+<span class="go">-- out/adt-amp.json ----------------------------------------</span>
+<span class="go">-- out/adt-dupe.json ----------------------------------------</span>
+<span class="go">-- out/adt.json ----------------------------------------</span>
+<span class="go">-- out/adt-newctl.json ----------------------------------------</span>
+<span class="go">-- out/adt-on.json ----------------------------------------</span>
+<span class="go">-- out/adt-zseg.json ----------------------------------------</span>
+<span class="go">-- out/regression.json ----------------------------------------</span>
+<span class="go">*FAILURE*: 2 errors, 1 warnings, 1 notes</span>
+<span class="go">  Error @ Patient.gender (line 18, col16): The System URI could not be determined for the code 'F' in the ValueSet 'http://hl7.org/fhir/ValueSet/administrative-gender|4.0.1', validating against Canadian Baseline v1.2.0</span>
+<span class="go">  Error @ Patient.gender (line 18, col16): The value provided ('F') was not found in the value set 'AdministrativeGender' (http://hl7.org/fhir/ValueSet/administrative-gender|4.0.1), and a code is required from this value set  (error message = The System URI could not be determined for the code 'F' in the ValueSet 'http://hl7.org/fhir/ValueSet/administrative-gender|4.0.1'; The provided code '#F' was not found in the value set 'http://hl7.org/fhir/ValueSet/administrative-gender|4.0.1'), validating against Canadian Baseline v1.2.0</span>
+<span class="go">exit 1</span>
+</code></pre></div></div>
+
+<p>Exit status 1, and the log names the element and the value set. Here is a
+GitHub Actions workflow around the same script. We did not run it on GitHub;
+its commands are the ones you just saw. Pin the validator and IG versions, or
+the build can break because a new release came out rather than because your
+code changed.</p>
+
+<div class="language-yaml highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># .github/workflows/validate.yml (not run on GitHub for this page)</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">validate</span>
+<span class="nt">on</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">push</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">pull_request</span><span class="p p-Indicator">]</span>
+<span class="nt">jobs</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fhir</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">runs-on</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ubuntu-latest</span>
+<span class="w">    </span><span class="nt">steps</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">actions/checkout@v4</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">actions/setup-java@v4</span>
+<span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">distribution</span><span class="p">:</span><span class="w"> </span><span class="nv">temurin</span><span class="p p-Indicator">,</span><span class="nt"> java-version</span><span class="p">:</span><span class="w"> </span><span class="s">"21"</span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">actions/setup-python@v5</span>
+<span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">python-version</span><span class="p">:</span><span class="w"> </span><span class="s">"3.12"</span><span class="p p-Indicator">}</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pip install hl7</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Bridge output for every sample message</span>
+<span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">python3 make-patients.py adt*.hl7</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Get the validator (pinned)</span>
+<span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">          </span><span class="no">curl -sSLo validator_cli.jar https://github.com/hapifhir/org.hl7.fhir.core/releases/download/7.0.3/validator_cli.jar</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Validate (fails the job on any error)</span>
+<span class="w">        </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./ci-validate.sh out/*.json</span>
+</code></pre></div></div>
+
+<h2 id="validate-on-the-server">$validate on the server</h2>
+
+<p>Servers offer the same check as an operation,
+<code class="language-plaintext highlighter-rouge">POST [base]/Patient/$validate</code>, and it answers differently:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>v.json<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@synthea-patient.json<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient/\$validate"</span>
+<span class="go">200</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.issue[] | "\(.severity): \(.diagnostics)"'</span><span class="w"> </span>v.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-c1-110
+<span class="go">information: Unknown extension http://hl7.org/fhir/us/core/StructureDefinition/us-core-race</span>
+<span class="go">information: Unknown extension http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity</span>
+<span class="go">information: Unknown extension http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex</span>
+<span class="go">information: Unknown extension http://synthetichealth.github.io/synthea/disability-adjusted-life-years</span>
+<span class="go">information: Unknown extension http://synthetichealth.github.io/synthea/quality-adjusted-life-years</span>
+<span class="go">warning: None of the codings provided are in the value set 'IdentifierType' (http://hl7.org/fhir/ValueSet/iden</span>
+<span class="go">error: Profile reference 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient' has not been checke</span>
+<span class="go">error: Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/core/StructureDefinition/us</span>
+</code></pre></div></div>
+
+<p>HTTP 200, with errors inside: the status says the operation ran, not that the
+resource is valid, so read every issue's severity, as week 0 warned. And the
+verdict changed. Our HAPI has no US Core package loaded, so it couldn't check
+the claimed profile, reported that as an error, and treated the extensions as
+merely unknown. A server validates only against what it has loaded. Use the
+CLI with pinned packages in CI.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> ask it to explain validator messages, then
+  confirm each against the profile's own page.</p>
+</blockquote>
+
+<h1 id="smart-on-fhir">SMART on FHIR</h1>
+
+<p>Real EHR FHIR APIs require a token, and SMART App Launch is how an app gets
+one: OAuth 2.0 plus conventions for discovery, scopes and launch context. In an
+<strong>EHR launch</strong> the clinician is already in the chart and opens the
+app from inside it; the EHR passes the app an <code class="language-plaintext highlighter-rouge">iss</code> (the FHIR base
+URL) and an opaque <code class="language-plaintext highlighter-rouge">launch</code> value, which the app trades for a token
+tied to that patient and user. In a <strong>standalone launch</strong> the app
+starts on its own, like a patient's phone app, and the patient is chosen
+during login.</p>
+
+<p>Scopes say what the token allows. In SMART v2,
+<code class="language-plaintext highlighter-rouge">patient/Observation.rs</code> means read and search Observations for the
+patient in context (v1 wrote <code class="language-plaintext highlighter-rouge">patient/Observation.read</code>). Ask for
+the narrowest scope the screen needs: a labs app has no business holding
+<code class="language-plaintext highlighter-rouge">patient/*.rs</code>, and v2 can narrow further with a search parameter,
+<code class="language-plaintext highlighter-rouge">patient/Observation.rs?category=…|laboratory</code>. The server may grant
+less than you asked for, so read <code class="language-plaintext highlighter-rouge">scope</code> in the token response.</p>
+
+<p>Every SMART app must use PKCE (Proof Key for Code Exchange). The app makes a
+random <em>verifier</em> and sends only its SHA-256 hash, the
+<em>challenge</em>, when it asks for authorization. To swap the resulting code
+for a token it must show the verifier, so someone who intercepts the code
+can't use it. SMART servers must support <code class="language-plaintext highlighter-rouge">S256</code> and must not
+support <code class="language-plaintext highlighter-rouge">plain</code>.</p>
+
+<h2 id="walking-the-flow-with-curl">Walking the flow with curl</h2>
+
+<p>The public SMART launcher at <code class="language-plaintext highlighter-rouge">launch.smarthealthit.org</code> simulates
+an EHR, with an authorization server and a FHIR server of synthetic patients.
+Discovery comes first: a SMART server publishes its endpoints at
+<code class="language-plaintext highlighter-rouge">.well-known/smart-configuration</code> under the FHIR base. Then we play
+the EHR and the app by hand. The launcher's <code class="language-plaintext highlighter-rouge">launch</code> value is its
+own format, a base64url-encoded array that picks the patient and practitioner
+and turns on its “skip login” and “skip authorization” options, so curl can
+stand in for the browser:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">ISS</span><span class="o">=</span>https://launch.smarthealthit.org/v/r4/fhir
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="nv">$ISS</span>/.well-known/smart-configuration<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="err">'</span><span class="o">{</span>
+<span class="go">  authorization_endpoint, token_endpoint,</span>
+<span class="go">  code_challenge_methods_supported,</span>
+<span class="go">  capabilities: .capabilities[:4]}'</span>
+<span class="go">{</span>
+<span class="go">  "authorization_endpoint": "https://launch.smarthealthit.org/v/r4/auth/authorize",</span>
+<span class="go">  "token_endpoint": "https://launch.smarthealthit.org/v/r4/auth/token",</span>
+<span class="go">  "code_challenge_methods_supported": [</span>
+<span class="go">    "S256"</span>
+<span class="go">  ],</span>
+<span class="go">  "capabilities": [</span>
+<span class="go">    "launch-ehr",</span>
+<span class="go">    "launch-standalone",</span>
+<span class="go">    "client-public",</span>
+<span class="go">    "client-confidential-symmetric"</span>
+<span class="go">  ]</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">verifier</span><span class="o">=</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-base64<span class="w"> </span><span class="m">48</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'+/'</span><span class="w"> </span><span class="s1">'-_'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">'=\n'</span><span class="k">)</span>
+<span class="gp">$ </span><span class="nv">challenge</span><span class="o">=</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span>%s<span class="w"> </span><span class="s2">"</span><span class="nv">$verifier</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$verifier</span><span class="s2">"</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$challenge</span><span class="s2">"</span>
+<span class="go">DryLevn6WBMthLwXeYALOvosGIkgjX93BExBfK7RRcAZr4SoKMGdq69tZ7Lfdb71</span>
+<span class="go">xA0R2fgb6rnXL8OtPOsM19InC6wQBS6TvimI6dyCF-I</span>
+<span class="gp">$ </span>cat<span class="w"> </span>launch.json<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="go">[0,"87a339d0-8cae-418e-89c7-8651e6aab3c6","52919099-6a7a-442c-b0d5-2b02c0dd4b74","AUTO",1,1,0,"","","","","","","",0,1,""]</span>
+<span class="gp">$ </span><span class="nv">launch</span><span class="o">=</span><span class="k">$(</span>base64<span class="w"> </span>-w0<span class="w"> </span>launch.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'+/'</span><span class="w"> </span><span class="s1">'-_'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">'='</span><span class="k">)</span>
+<span class="gp">$ </span><span class="nv">AUTH</span><span class="o">=</span>https://launch.smarthealthit.org/v/r4/auth
+<span class="gp">$ </span><span class="nv">CB</span><span class="o">=</span>http://localhost:9000/cb
+<span class="gp">$ </span><span class="nv">loc</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{redirect_url}'</span><span class="w"> </span>-G<span class="w"> </span><span class="nv">$AUTH</span>/authorize<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">response_type</span><span class="o">=</span>code<span class="w"> </span>-d<span class="w"> </span><span class="nv">client_id</span><span class="o">=</span>labs-app<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="nv">redirect_uri</span><span class="o">=</span><span class="nv">$CB</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-urlencode<span class="w"> </span><span class="s1">'scope=launch openid patient/Observation.rs'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">state</span><span class="o">=</span>abc123<span class="w"> </span>--data-urlencode<span class="w"> </span><span class="nv">aud</span><span class="o">=</span><span class="nv">$ISS</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">launch</span><span class="o">=</span><span class="nv">$launch</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">code_challenge</span><span class="o">=</span><span class="nv">$challenge</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">code_challenge_method</span><span class="o">=</span>S256<span class="k">)</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$loc</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span><span class="s1">'s/code=[^&amp;]*/code=.../'</span>
+<span class="go">http://localhost:9000/cb?code=...&amp;state=abc123</span>
+<span class="gp">$ </span><span class="nv">code</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$loc</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span><span class="s1">'s/.*code=\([^&amp;]*\).*/\1/'</span><span class="k">)</span>
+<span class="gp">$ </span>token<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="nv">$AUTH</span>/token<span class="w"> </span>-d<span class="w"> </span><span class="nv">grant_type</span><span class="o">=</span>authorization_code<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">code</span><span class="o">=</span><span class="nv">$code</span><span class="w"> </span>--data-urlencode<span class="w"> </span><span class="nv">redirect_uri</span><span class="o">=</span><span class="nv">$CB</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">client_id</span><span class="o">=</span>labs-app<span class="w"> </span>-d<span class="w"> </span><span class="nv">code_verifier</span><span class="o">=</span><span class="nv">$1</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+<span class="gp">$ </span>token<span class="w"> </span>wrong-verifier<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+<span class="go">{</span>
+<span class="go">  "error": "invalid_grant",</span>
+<span class="go">  "error_description": "Invalid grant or Invalid PKCE Verifier, 'ZugODcX1jSZ8ehrZTQtS5NEW5sILxakqdD2YByJ-xH4' vs 'xA0R2fgb6rnXL8OtPOsM19InC6wQBS6TvimI6dyCF-I'."</span>
+<span class="go">}</span>
+<span class="gp">$ </span>token<span class="w"> </span><span class="nv">$verifier</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'del(.access_token, .id_token)'</span>
+<span class="go">{</span>
+<span class="go">  "token_type": "Bearer",</span>
+<span class="go">  "expires_in": 3600,</span>
+<span class="go">  "scope": "launch openid patient/Observation.rs",</span>
+<span class="go">  "need_patient_banner": true,</span>
+<span class="go">  "smart_style_url": "https://launch.smarthealthit.org/smart-style.json",</span>
+<span class="go">  "patient": "87a339d0-8cae-418e-89c7-8651e6aab3c6",</span>
+<span class="go">  "encounter": "418e38cf-9da6-4155-b205-0be24024b1db"</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">tok</span><span class="o">=</span><span class="k">$(</span>token<span class="w"> </span><span class="nv">$verifier</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.access_token<span class="k">)</span>
+<span class="gp">$ </span><span class="nv">p</span><span class="o">=</span>87a339d0-8cae-418e-89c7-8651e6aab3c6
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$tok</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$ISS</span><span class="s2">/Condition?patient=</span><span class="nv">$p</span><span class="s2">"</span>
+<span class="go">200</span>
+</code></pre></div></div>
+
+<p>The authorization request came straight back to our redirect URI with a
+code and our <code class="language-plaintext highlighter-rouge">state</code>. The wrong verifier was refused because its
+hash didn't match the challenge. The right one got a token, and the response
+carries the launch context, the <code class="language-plaintext highlighter-rouge">patient</code> and <code class="language-plaintext highlighter-rouge">encounter</code>
+the EHR had open: that's how an EHR-launched app knows whose chart it's
+in.</p>
+
+<p>Two things there are sandbox behaviour your app must not rely on. We used
+the same code twice and both worked; OAuth 2.0 <a
+href="https://www.rfc-editor.org/rfc/rfc6749">says a code must not be used more
+than once</a>. And a token scoped to Observations read Conditions: the
+launcher's FHIR server doesn't enforce scopes. A real EHR does, so test scope
+handling against the vendor's sandbox.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> the launcher sandbox accepted an authorization
+  code twice and served Conditions to a token scoped to
+  <code class="language-plaintext highlighter-rouge">patient/Observation.rs</code>. We did not run the browser flow: no
+  login page, patient picker or consent screen was exercised; the launcher's
+  options skipped them.</p>
+</blockquote>
+
+<h2 id="a-smart-app-in-typescript">A SMART app in TypeScript</h2>
+
+<p>In practice the SMART JavaScript client, <code class="language-plaintext highlighter-rouge">fhirclient</code>, does
+discovery, state, PKCE and the token exchange. Here is the server-side Express
+version, in the shape of week 0's TypeScript app. The launch route starts
+authorization:</p>
+
+<div class="language-typescript highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// The EHR opens /launch?iss=&lt;FHIR base&gt;&amp;launch=&lt;opaque&gt;</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/launch"</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">smart</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">).</span><span class="nx">authorize</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">clientId</span><span class="o">:</span><span class="w"> </span><span class="s2">"labs-app"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">scope</span><span class="o">:</span><span class="w"> </span><span class="s2">"launch openid fhirUser patient/Observation.rs"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">redirectUri</span><span class="o">:</span><span class="w"> </span><span class="s2">"/app"</span><span class="p">,</span>
+<span class="w">  </span><span class="p">}).</span><span class="k">catch</span><span class="p">(</span><span class="nx">next</span><span class="p">);</span>
+<span class="p">});</span>
+</code></pre></div></div>
+
+<p>and the redirect route finishes it and reads labs and vital signs for the
+patient in context:</p>
+
+<div class="language-typescript highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// The authorization server redirects back here with ?code=&amp;state=</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/app"</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">next</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">smart</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">).</span><span class="nx">ready</span><span class="p">();</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">lines</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="sb">`patient </span><span class="si">${</span><span class="nx">client</span><span class="p">.</span><span class="nx">patient</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">                   </span><span class="sb">`scope </span><span class="si">${</span><span class="nx">client</span><span class="p">.</span><span class="nx">state</span><span class="p">.</span><span class="nx">tokenResponse</span><span class="o">?</span><span class="p">.</span><span class="nx">scope</span><span class="si">}</span><span class="sb">`</span><span class="p">];</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">cat</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="p">[</span><span class="s2">"laboratory"</span><span class="p">,</span><span class="w"> </span><span class="s2">"vital-signs"</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="kd">const</span><span class="w"> </span><span class="nx">bundle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">request</span><span class="o">&lt;</span><span class="nx">Bundle</span><span class="o">&gt;</span><span class="p">(</span>
+<span class="w">        </span><span class="sb">`Observation?patient=</span><span class="si">${</span><span class="nx">client</span><span class="p">.</span><span class="nx">patient</span><span class="p">.</span><span class="nx">id</span><span class="si">}</span><span class="sb">`</span><span class="w"> </span><span class="o">+</span>
+<span class="w">        </span><span class="sb">`&amp;category=</span><span class="si">${</span><span class="nx">cat</span><span class="si">}</span><span class="sb">&amp;_sort=-date&amp;_count=4`</span><span class="p">);</span>
+<span class="w">      </span><span class="nx">lines</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="sb">`-- </span><span class="si">${</span><span class="nx">cat</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span>
+<span class="w">                 </span><span class="p">...(</span><span class="nx">bundle</span><span class="p">.</span><span class="nx">entry</span><span class="w"> </span><span class="o">??</span><span class="w"> </span><span class="p">[]).</span><span class="nx">map</span><span class="p">((</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">show</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">resource</span><span class="p">)));</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="nx">res</span><span class="p">.</span><span class="kr">type</span><span class="p">(</span><span class="s2">"text/plain"</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="nx">lines</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="s2">"\n"</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s2">"\n"</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nx">next</span><span class="p">(</span><span class="nx">e</span><span class="p">);</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div></div>
+
+<p>We ran it with <code class="language-plaintext highlighter-rouge">tsx</code> and let curl play the browser, following
+redirects and keeping the session cookie:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>npm<span class="w"> </span>init<span class="w"> </span>-y<span class="w"> </span>&gt;<span class="w"> </span>/dev/null
+<span class="gp">$ </span>npm<span class="w"> </span>install<span class="w"> </span>--no-fund<span class="w"> </span>--no-audit<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>fhirclient@3.0.1<span class="w"> </span>express<span class="w"> </span>express-session<span class="w"> </span>tsx
+
+<span class="go">added 80 packages in 644ms</span>
+<span class="gp">$ </span><span class="nv">PORT</span><span class="o">=</span><span class="m">9000</span><span class="w"> </span>npx<span class="w"> </span>tsx<span class="w"> </span>labs-app.ts<span class="w"> </span>&gt;<span class="w"> </span>app.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="gp">$ </span>timeout<span class="w"> </span><span class="m">60</span><span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="err">'</span><span class="k">until</span><span class="w"> </span>grep<span class="w"> </span>-q<span class="w"> </span><span class="s2">"labs-app on"</span><span class="w"> </span>app.log<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  sleep 1; done' || exit 1</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-sL<span class="w"> </span>-c<span class="w"> </span>cookies.txt<span class="w"> </span>-b<span class="w"> </span>cookies.txt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"localhost:9000/launch?iss=</span><span class="nv">$ISS</span><span class="s2">&amp;launch=</span><span class="nv">$launch</span><span class="s2">"</span>
+<span class="go">patient 87a339d0-8cae-418e-89c7-8651e6aab3c6</span>
+<span class="go">scope launch openid fhirUser patient/Observation.rs</span>
+<span class="go">-- laboratory</span>
+<span class="go">2020-11-11  Creatinine: 0.8 mg/dL</span>
+<span class="go">2020-11-11  Carbon Dioxide: 23.1 mmol/L</span>
+<span class="go">2020-11-11  Total Cholesterol: 191.2 mg/dL</span>
+<span class="go">2020-11-11  Low Density Lipoprotein Cholesterol: 100.3 mg/dL</span>
+<span class="go">-- vital-signs</span>
+<span class="go">2020-11-11  Blood Pressure: 77.9 mm[Hg] / 111.8 mm[Hg]</span>
+<span class="go">2020-11-11  Body Weight: 83.9 kg</span>
+<span class="go">2020-11-11  Pain severity - 0-10 verbal numeric rating [Score] - Reported: 3.6 {score}</span>
+<span class="go">2020-11-11  Body Mass Index: 30.1 kg/m2</span>
+<span class="gp">$ </span><span class="nb">kill</span><span class="w"> </span>%1
+</code></pre></div></div>
+
+<p>Labs and vitals for the launched patient. The sandbox's blood pressure lists
+the diastolic component first, so a real app should label each component by
+its code. This app reads one page per category; for a full history, follow
+<code class="language-plaintext highlighter-rouge">next</code> as before, or use <code class="language-plaintext highlighter-rouge">fhirclient</code>'s
+<code class="language-plaintext highlighter-rouge">pageLimit</code> option. We did not open it in a browser or inside a real
+EHR. Download <a href="static/files/week-4/labs-app.ts">labs-app.ts</a> and <a
+href="static/files/week-4/launch.json">launch.json</a>.</p>
+
+<h1 id="cds-hooks">CDS Hooks</h1>
+
+<p>SMART puts your app in front of the clinician when they open it. CDS Hooks
+works the other way: the EHR calls <em>your</em> service at moments in the
+workflow called hooks, and shows what you return. <code class="language-plaintext highlighter-rouge">patient-view</code>
+fires when a chart is opened; <code class="language-plaintext highlighter-rouge">order-select</code> and
+<code class="language-plaintext highlighter-rouge">order-sign</code> fire while orders are written. You answer with
+<em>cards</em>: a summary, an indicator (<code class="language-plaintext highlighter-rouge">info</code>,
+<code class="language-plaintext highlighter-rouge">warning</code> or <code class="language-plaintext highlighter-rouge">critical</code>), a source, and optionally
+suggestions or links that launch a SMART app.</p>
+
+<p>A service describes itself at <code class="language-plaintext highlighter-rouge">{base}/cds-services</code>, including a
+<code class="language-plaintext highlighter-rouge">prefetch</code> template: FHIR queries the EHR runs and sends along, so
+the service doesn't call back while a clinician waits. Ours shows the latest
+HbA1c:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">A1C</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"Observation?patient={{context.patientId}}"</span>
+       <span class="s2">"&amp;code=http://loinc.org|4548-4&amp;_sort=-date&amp;_count=1"</span><span class="p">)</span>
+<span class="n">SERVICE</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"hook"</span><span class="p">:</span> <span class="s2">"patient-view"</span><span class="p">,</span>
+    <span class="s2">"id"</span><span class="p">:</span> <span class="s2">"a1c-latest"</span><span class="p">,</span>
+    <span class="s2">"title"</span><span class="p">:</span> <span class="s2">"Latest HbA1c"</span><span class="p">,</span>
+    <span class="s2">"description"</span><span class="p">:</span> <span class="s2">"Shows the most recent HbA1c, or warns if none."</span><span class="p">,</span>
+    <span class="s2">"prefetch"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"a1c"</span><span class="p">:</span> <span class="n">A1C</span><span class="p">},</span>
+<span class="p">}</span>
+<span class="n">SOURCE</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"label"</span><span class="p">:</span> <span class="s2">"Week 4 demo service (synthetic data)"</span><span class="p">}</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">fetch_a1c</span><span class="p">(</span><span class="n">req</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Used only when the EHR sent no prefetch: ask its FHIR server."""</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="n">A1C</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"{{context.patientId}}"</span><span class="p">,</span>
+                        <span class="n">req</span><span class="p">[</span><span class="s2">"context"</span><span class="p">][</span><span class="s2">"patientId"</span><span class="p">])</span>
+    <span class="n">http</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">Request</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">req</span><span class="p">[</span><span class="s1">'fhirServer'</span><span class="p">]</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">query</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="p">(</span><span class="n">req</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"fhirAuthorization"</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"access_token"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">token</span><span class="p">:</span>
+        <span class="n">http</span><span class="o">.</span><span class="n">add_header</span><span class="p">(</span><span class="s2">"Authorization"</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"Bearer </span><span class="si">{</span><span class="n">token</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">with</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">http</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span> <span class="k">as</span> <span class="n">resp</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">resp</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">cards</span><span class="p">(</span><span class="n">req</span><span class="p">):</span>
+    <span class="n">bundle</span> <span class="o">=</span> <span class="n">req</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"prefetch"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"a1c"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">bundle</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">bundle</span> <span class="o">=</span> <span class="n">fetch_a1c</span><span class="p">(</span><span class="n">req</span><span class="p">)</span>
+    <span class="n">entries</span> <span class="o">=</span> <span class="n">bundle</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"entry"</span><span class="p">,</span> <span class="p">[])</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">entries</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[{</span><span class="s2">"summary"</span><span class="p">:</span> <span class="s2">"No HbA1c on file"</span><span class="p">,</span> <span class="s2">"indicator"</span><span class="p">:</span> <span class="s2">"warning"</span><span class="p">,</span>
+                 <span class="s2">"source"</span><span class="p">:</span> <span class="n">SOURCE</span><span class="p">}]</span>
+    <span class="n">obs</span> <span class="o">=</span> <span class="n">entries</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"resource"</span><span class="p">]</span>
+    <span class="n">q</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s2">"valueQuantity"</span><span class="p">]</span>
+    <span class="n">when</span> <span class="o">=</span> <span class="n">obs</span><span class="p">[</span><span class="s2">"effectiveDateTime"</span><span class="p">][:</span><span class="mi">10</span><span class="p">]</span>
+    <span class="k">return</span> <span class="p">[{</span><span class="s2">"summary"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"Latest HbA1c </span><span class="si">{</span><span class="n">q</span><span class="p">[</span><span class="s1">'value'</span><span class="p">]</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">q</span><span class="p">[</span><span class="s1">'unit'</span><span class="p">]</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">when</span><span class="si">}</span><span class="s2">)"</span><span class="p">,</span>
+             <span class="s2">"indicator"</span><span class="p">:</span> <span class="s2">"info"</span><span class="p">,</span> <span class="s2">"source"</span><span class="p">:</span> <span class="n">SOURCE</span><span class="p">}]</span>
+</code></pre></div></div>
+
+<p>The course had CDS Hooks as “not tested yet”. We ran this service locally,
+with curl playing the EHR: once with a prefetched result from our HAPI, then
+for a patient with no HbA1c and no prefetch, so the service queried the
+<code class="language-plaintext highlighter-rouge">fhirServer</code> itself:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>python3<span class="w"> </span>cds-service.py<span class="w"> </span><span class="m">3001</span><span class="w"> </span>&gt;<span class="w"> </span>cds.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="gp">$ </span>sleep<span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:3001/cds-services<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+<span class="go">{</span>
+<span class="go">  "services": [</span>
+<span class="go">    {</span>
+<span class="go">      "hook": "patient-view",</span>
+<span class="go">      "id": "a1c-latest",</span>
+<span class="go">      "title": "Latest HbA1c",</span>
+<span class="go">      "description": "Shows the most recent HbA1c, or warns if none.",</span>
+<span class="go">      "prefetch": {</span>
+<span class="go">        "a1c": "Observation?patient={{context.patientId}}&amp;code=http://loinc.org|4548-4&amp;_sort=-date&amp;_count=1"</span>
+<span class="go">      }</span>
+<span class="go">    }</span>
+<span class="go">  ]</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">F</span><span class="o">=</span>localhost:8080/fhir
+<span class="gp">$ </span><span class="nv">pid</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?name=Beahan375"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -r '.entry[0].resource.id')</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Observation?patient=</span><span class="nv">$pid</span><span class="s2">&amp;_sort=-date&amp;_count=1\</span>
+<span class="s2">&amp;code=http://loinc.org%7C4548-4"</span><span class="w"> </span>&gt;<span class="w"> </span>a1c.json
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>--arg<span class="w"> </span>pid<span class="w"> </span><span class="nv">$pid</span><span class="w"> </span>--slurpfile<span class="w"> </span>a1c<span class="w"> </span>a1c.json<span class="w"> </span><span class="err">'</span><span class="o">{</span>
+<span class="go">  hook: "patient-view",</span>
+<span class="go">  hookInstance: "0b6f6c1e-3d1a-4f7e-9a51-2c4e8d7b9f10",</span>
+<span class="go">  context: {userId: "Practitioner/example", patientId: $pid},</span>
+<span class="go">  prefetch: {a1c: $a1c[0]}}' &gt; hook.json</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span>--data<span class="w"> </span>@hook.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>localhost:3001/cds-services/a1c-latest<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+<span class="go">{</span>
+<span class="go">  "cards": [</span>
+<span class="go">    {</span>
+<span class="go">      "summary": "Latest HbA1c 2.82 % (2026-10-31)",</span>
+<span class="go">      "indicator": "info",</span>
+<span class="go">      "source": {</span>
+<span class="go">        "label": "Week 4 demo service (synthetic data)"</span>
+<span class="go">      }</span>
+<span class="go">    }</span>
+<span class="go">  ]</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">pid2</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$F</span><span class="s2">/Patient?name=Hickle134"</span><span class="w"> </span><span class="p">|</span>
+<span class="go">  jq -r '.entry[0].resource.id')</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>--arg<span class="w"> </span>pid<span class="w"> </span><span class="nv">$pid2</span><span class="w"> </span>--arg<span class="w"> </span>fhir<span class="w"> </span><span class="s2">"http://</span><span class="nv">$F</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span><span class="o">{</span>
+<span class="go">  hook: "patient-view",</span>
+<span class="go">  hookInstance: "5c2d9e47-8b1f-4c3a-b6e0-7f4a1d2c3b5e",</span>
+<span class="go">  fhirServer: $fhir,</span>
+<span class="go">  context: {userId: "Practitioner/example", patientId: $pid}}' |</span>
+<span class="go">  curl -s -H 'Content-Type: application/json' --data @- \</span>
+<span class="go">  localhost:3001/cds-services/a1c-latest | jq -c .</span>
+<span class="go">{"cards":[{"summary":"No HbA1c on file","indicator":"warning","source":{"label":"Week 4 demo service (synthetic data)"}}]}</span>
+<span class="gp">$ </span><span class="nb">kill</span><span class="w"> </span>%1<span class="p">;</span><span class="w"> </span>cat<span class="w"> </span>cds.log
+<span class="go">127.0.0.1 - - [31/Oct/2026 18:26:20] "GET /cds-services HTTP/1.1" 200 -</span>
+<span class="go">127.0.0.1 - - [31/Oct/2026 18:26:20] "POST /cds-services/a1c-latest HTTP/1.1" 200 -</span>
+<span class="go">127.0.0.1 - - [31/Oct/2026 18:26:20] "POST /cds-services/a1c-latest HTTP/1.1" 200 -</span>
+</code></pre></div></div>
+
+<p>That is the protocol's whole shape: discovery, a hook call with context and
+prefetch, cards back. We did not test it inside an EHR or the CDS Hooks
+sandbox, which also need CORS headers and verification of the JWT the EHR
+sends. And look at the value: an HbA1c of 2.82 % isn't something you'd expect
+on a real chart. Synthea's values come from its disease models and aren't
+always clinically plausible, so never test clinical logic only against
+them.</p>
+
+<blockquote>
+  <p>Cards interrupt busy people. Use the narrowest hook that fits, return no
+  card when there's nothing to say, and keep the summary short (the spec caps
+  it at 140 characters). A service that cries wolf trains clinicians to
+  dismiss every card, including the one that matters.</p>
+</blockquote>
+
+<h1 id="access-rules-and-testing">Patient access, information blocking, TEFCA and Inferno</h1>
+
+<p>Much of this exists because of regulation. In the US, the ONC Cures Act
+Final Rule requires certified health IT to offer a standardized FHIR API with
+SMART authorization, including for patients reaching their own records, and
+its <em>information blocking</em> rules make it a problem to interfere with
+access to, exchange or use of electronic health information, outside listed
+exceptions. TEFCA, the Trusted Exchange Framework and Common Agreement, is the
+US national network of networks. In Canada, health care is run by the
+provinces and territories, and what their systems must support is set mostly
+by them and their programs, with CACDI and HL7 Canada's guides as the shared
+national reference.</p>
+
+<p>To check conformance, Inferno, ONC's open test tool, runs test kits against
+a FHIR endpoint: US Core profiles and searches, SMART launch and bulk export.
+We did not run Inferno for this page.</p>
+
+<p>Lab files: <a href="static/files/week-4/fetch-all.sh">fetch-all.sh</a>,
+<a href="static/files/week-4/minimal-patient.json">minimal-patient.json</a>,
+<a href="static/files/week-4/make-patients.py">make-patients.py</a> (uses week
+3's <a href="static/files/week-3/bridge.py">bridge.py</a>),
+<a href="static/files/week-4/ci-validate.sh">ci-validate.sh</a>,
+<a href="static/files/week-4/validate.yml">validate.yml</a>,
+<a href="static/files/week-4/labs-app.ts">labs-app.ts</a>,
+<a href="static/files/week-4/launch.json">launch.json</a>,
+<a href="static/files/week-4/cds-service.py">cds-service.py</a>.</p>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>Your bridge's output validates in CI.</li>
+  <li>Every Synthea error is explained.</li>
+  <li>Your SMART app shows labs and vitals via the launcher.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>What's the difference between USCDI and US Core? Answer for Canada too
+  (CACDI against CA Baseline and CA Core+), and say which one a validator can
+  check.</li>
+  <li>Why does Synthea's own output fail validation? Strip the two extensions
+  with jq and re-run against US Core and CA Baseline. What's left, and is any
+  of it an error?</li>
+  <li>What scope does an app need to read one patient's labs? Write it as a
+  SMART v1 scope, a v2 scope, and a v2 scope narrowed to the laboratory
+  category.</li>
+  <li>Reading only the first page of a search: find a place in your week 0 kata
+  or SMART app that does it and fix it. Prove the fix with a patient who has
+  more results than fit on one page.</li>
+  <li>Write one search that returns a patient's MedicationRequests with their
+  prescribers and encounters. Explain why <code class="language-plaintext highlighter-rouge">total</code> doesn't match the
+  number of entries.</li>
+  <li>Add the validator to CI for your week 3 bridge (<code class="language-plaintext highlighter-rouge">-ig
+  hl7.fhir.us.core</code> or <code class="language-plaintext highlighter-rouge">hl7.fhir.ca.baseline</code>), validate the
+  Patients it writes and fix every error. Then map the <code class="language-plaintext highlighter-rouge">JHN</code> health
+  card number to a second identifier and validate again.</li>
+  <li>Run the week 0 SMART app through the SMART launcher in a real browser,
+  with login and patient selection on, and add vital signs with labelled blood
+  pressure components. Ask for the narrowest scope that still works.</li>
+  <li>Run <code class="language-plaintext highlighter-rouge">$export</code> for one patient (<code class="language-plaintext highlighter-rouge">Patient/[id]/$export</code>).
+  What would you add before pointing the same client at a production
+  server?</li>
+  <li>Stretch: put the CDS service behind the CDS Hooks sandbox. What does it
+  need besides the code above? Decide when it should return no card at
+  all.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://hl7.org/fhir/us/core/">US Core</a></li>
+  <li><a href="https://build.fhir.org/ig/HL7-Canada/ca-baseline/">CA Baseline</a></li>
+  <li><a href="https://hl7.org/fhir/smart-app-launch/">SMART</a></li>
+  <li><a href="https://cds-hooks.hl7.org/">CDS Hooks</a></li>
+  <li><a href="https://www.healthit.gov/isp/united-states-core-data-interoperability-uscdi">USCDI</a></li>
+  <li><a href="https://www.healthit.gov/topic/interoperability/policy/trusted-exchange-framework-and-common-agreement-tefca">TEFCA</a></li>
+  <li><a href="https://hl7.org/fhir/R4/search.html">FHIR R4 search (chaining, _include, _count)</a></li>
+  <li><a href="https://hl7.org/fhir/R4/validation.html">FHIR R4 validation</a></li>
+  <li><a href="https://hl7.org/fhir/smart-app-launch/scopes-and-launch-context.html">SMART scopes and launch context</a></li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc7636">RFC 7636: PKCE</a></li>
+  <li><a href="https://hl7.org/fhir/uv/bulkdata/">Bulk Data Access ($export)</a></li>
+  <li><a href="https://connected-care.cihi.ca/en/products/v3/CACDI/">CACDI (CIHI)</a></li>
+  <li><a href="https://simplifier.net/guide/CA-Core/Index/Home.page.md?version=current">CA Core+ (draft)</a></li>
+  <li><a href="https://www.healthit.gov/topic/information-blocking">Information blocking (ASTP/ONC)</a></li>
+  <li><a href="https://www.healthit.gov/topic/oncs-cures-act-final-rule">ONC Cures Act Final Rule</a></li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc6749">RFC 6749: OAuth 2.0</a></li>
+  <li><a href="https://inferno.healthit.gov/">Inferno test kits</a></li>
+  <li><a href="https://docs.smarthealthit.org/client-js/">fhirclient (SMART JavaScript client)</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

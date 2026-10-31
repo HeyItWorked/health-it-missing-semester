@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 0 of the Health IT Missing Semester: Stack short runs.">
+
+  <title>Stack short runs &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">Stack short runs</h1>
+<h2 class="subtitle">Week 0 · ~10 h: deep in one stack, 1–2 h each for the rest</h2>
+
+<p>Employers hire into a stack. A hospital that runs its integration on Java
+wants people who know HAPI FHIR; a vendor whose product sits on Azure wants C#
+and the Firely SDK; data teams write Python; patient-facing apps are often
+TypeScript. One identical exercise in Java, C#, Python and TypeScript shows how
+they differ, and your main stack's client returns in weeks 3–6.</p>
+
+<p>The exercise is small on purpose, but every step in it guards against a bug
+that reaches patients. Look a patient up the wrong way and you update somebody
+else's chart. Create where you meant to update and the hospital now has two
+records for one person: allergies on one, medications on the other, and the
+clinician sees only half. Write without checking versions and a phone number
+that registration just corrected is silently put back, so the clinic can't
+reach the patient with a result. These bugs look the same in every language,
+and so do the defences. Only the spelling changes.</p>
+
+<p>This week we start a local FHIR server, give it one synthetic patient,
+learn the handful of REST calls the exercise needs, and then do the same kata
+four times, once per stack, against the same patient. At the end we prove from
+the server's own history that each run wrote exactly once, and we push
+conditional updates until they fail, so you know what failure looks like.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab: a
+local HAPI FHIR 8.12.0 server in Docker, Synthea (master build of 21 Oct 2026),
+the HAPI FHIR 8.2.2 client on OpenJDK 25, Firely SDK 6.8.0 on .NET SDK 8.0.121,
+fhirclient 4.4.0 on Python 3.12, and fhirclient 3.0.1 with Express 5.3 on Node
+20. The outputs are copied from those runs. Yours will differ in timestamps,
+server ids and file names.</p>
+
+<h1 id="the-kata">The kata</h1>
+
+<p>A kata is a drill you repeat until the moves are automatic. Ours is the
+smallest useful piece of integration work: a patient's details changed
+somewhere else, and we must update the one record that holds them. In
+order:</p>
+
+<ol>
+  <li>Find the patient by medical record number (MRN). Expect exactly one
+  match.</li>
+  <li>Change something: add a mobile number.</li>
+  <li>Ask the server to <code class="language-plaintext highlighter-rouge">$validate</code> the changed resource, and read
+  the severity of every issue it reports.</li>
+  <li>Write it back with a conditional <code class="language-plaintext highlighter-rouge">PUT</code> keyed on the MRN.</li>
+  <li>Read it back by MRN. Expect one match, and a version one higher than
+  before.</li>
+  <li>Prove exactly one write happened.</li>
+</ol>
+
+<p>Here are the kata's calls as tested. <code class="language-plaintext highlighter-rouge">S</code> is the identifier system,
+the namespace that says whose MRN this is:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code># S = http://hospital.smarthealthit.org
+#     (the MRN system in Synthea&#x27;s output)
+GET  /fhir/Patient?identifier=S|&lt;mrn&gt;
+POST /fhir/Patient/$validate   # read every severity
+PUT  /fhir/Patient?identifier=S|&lt;mrn&gt;
+GET  /fhir/Patient?identifier=S|&lt;mrn&gt;  # version +1
+</code></pre></div></div>
+
+<p>Each kata prints one line per request with the method, the URL, the HTTP
+status and what it learned, then <code class="language-plaintext highlighter-rouge">PASS</code> or <code class="language-plaintext highlighter-rouge">FAIL</code>. That
+output format is the point. When a kata fails at work, the first question is
+always “which request, and what did the server answer?”, and an exercise that
+answers it on every line trains the habit.</p>
+
+<h1 id="a-fhir-server-to-practice-on">A FHIR server to practice on</h1>
+
+<p>HAPI FHIR is an open-source Java implementation of FHIR, and its project
+publishes a ready-to-run server image. With no configuration it keeps its data
+inside the container, which is right for practice: remove the container and
+you have a clean server. Start it and open <code class="language-plaintext highlighter-rouge">/fhir/metadata</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>hapi<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span>hapiproject/hapi:latest<span class="w"> </span>&gt;<span class="w"> </span>/dev/null
+<span class="gp">$ </span>timeout<span class="w"> </span><span class="m">120</span><span class="w"> </span>bash<span class="w"> </span>-c<span class="w"> </span><span class="s1">'until curl -sf -o /dev/null \</span>
+<span class="s1">  localhost:8080/fhir/metadata; do sleep 3; done'</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:8080/fhir/metadata<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'{fhirVersion, software}'</span>
+<span class="go">{</span>
+<span class="go">  "fhirVersion": "4.0.1",</span>
+<span class="go">  "software": {</span>
+<span class="go">    "name": "HAPI FHIR Server",</span>
+<span class="go">    "version": "8.12.0"</span>
+<span class="go">  }</span>
+<span class="go">}</span>
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">/metadata</code> returns the server's CapabilityStatement: the FHIR
+version it speaks (4.0.1 is R4, the release this course uses), the resources
+and searches it supports, and what software it is. Check it before you trust
+a server.</p>
+
+<h1 id="one-synthetic-patient">One synthetic patient</h1>
+
+<p>We never practise on real people. Synthea generates synthetic patients with
+realistic medical histories, written out as FHIR transaction bundles. With
+<code class="language-plaintext highlighter-rouge">-p 1</code> it makes one living patient; <code class="language-plaintext highlighter-rouge">-s 42</code> fixes the
+random seed, so you get the same patient we did.</p>
+
+<h2 id="synthea-claims-us-core">Synthea's default output claims US Core</h2>
+
+<p>Run it with the defaults first, into a separate directory:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span>-p<span class="w"> </span><span class="m">1</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--exporter.baseDirectory<span class="o">=</span>uscore<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^1 --|Records'</span>
+<span class="go">SLF4J: No SLF4J providers were found.</span>
+<span class="go">SLF4J: Defaulting to no-operation (NOP) logger implementation</span>
+<span class="go">SLF4J: See http://www.slf4j.org/codes.html#noProviders for further details.</span>
+<span class="go">1 -- Corie618 Sofia418 Beahan375 (101 y/o F) Franklin, Massachusetts  (153177)</span>
+<span class="go">Records: total=1, alive=1, dead=0</span>
+<span class="gp">$ </span>ls<span class="w"> </span>uscore/fhir
+<span class="go">Corie618_Sofia418_Beahan375_ba419d35-0dfe-8af7-347c-eebf02485a56.json</span>
+<span class="go">hospitalInformation1793484809781.json</span>
+<span class="go">practitionerInformation1793484809781.json</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.entry[0].resource.meta'</span><span class="w"> </span>uscore/fhir/Corie*.json
+<span class="go">{</span>
+<span class="go">  "profile": [</span>
+<span class="go">    "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"</span>
+<span class="go">  ]</span>
+<span class="go">}</span>
+</code></pre></div></div>
+
+<p>Three files: the patient's own bundle, and two bundles of the hospitals and
+clinicians who treated her. The SLF4J lines are Synthea's logging library
+announcing that no logger is configured; they are harmless. The interesting
+part is the patient's <code class="language-plaintext highlighter-rouge">meta.profile</code>. A profile is a set of extra
+rules on top of base FHIR, and by listing US Core's patient profile, the
+resource claims to follow those rules. US Core is the set of profiles the US
+uses for its core data. Now ask our server whether this patient is valid:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.entry[0].resource'</span><span class="w"> </span>uscore/fhir/Corie*.json<span class="w"> </span>&gt;<span class="w"> </span>p-uscore.json
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>oo.json<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@p-uscore.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'localhost:8080/fhir/Patient/$validate'</span>
+<span class="go">200</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.issue<span class="w"> </span><span class="p">|</span><span class="w"> </span>group_by<span class="o">(</span>.severity<span class="o">)[]</span>
+<span class="go">  | "\(length) \(.[0].severity)"' oo.json</span>
+<span class="go">2 error</span>
+<span class="go">5 information</span>
+<span class="go">1 warning</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.issue<span class="o">[]</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.severity<span class="w"> </span>!<span class="o">=</span><span class="w"> </span><span class="s2">"information"</span><span class="o">)</span>
+<span class="go">  | "\(.severity) \(.expression[0])"' oo.json</span>
+<span class="go">warning Patient.identifier[2].type</span>
+<span class="go">error Patient.meta.profile[0]</span>
+<span class="go">error null</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.issue<span class="o">[]</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.severity<span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"error"</span><span class="o">)</span>
+<span class="go">  | .diagnostics' oo.json</span>
+<span class="go">Profile reference 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient' has not been checked because it could not be found, and the validator is set to not fetch unknown profiles</span>
+<span class="go">Invalid profile. Failed to retrieve profile with url=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient</span>
+</code></pre></div></div>
+
+<p>HTTP 200, and two errors. Both say the same thing: the resource claims a
+profile the server doesn't have, so it can't check the claim, and it counts
+the unverifiable claim as an error. Our server was never told about US Core.
+You could load the US Core package into it; we didn't, because this week is
+about plain R4.</p>
+
+<p>The 200 is not HAPI being sloppy. The specification says
+<a href="https://hl7.org/fhir/R4/resource-operation-validate.html">this operation returns a 200 OK whether or not the resource is valid</a>;
+a 4xx or 5xx means the validation itself could not run. <code class="language-plaintext highlighter-rouge">$validate</code>
+returns an OperationOutcome: read every issue's severity. Watch out for
+trusting HTTP 200 from <code class="language-plaintext highlighter-rouge">$validate</code>; a client that checks the
+status code and moves on has validated nothing.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> all four katas pass against one patient (versions
+  1 → 5, still one patient). HAPI's <code class="language-plaintext highlighter-rouge">$validate</code> answers 200 even with
+  errors, and Synthea's default output fails it because it claims US Core.</p>
+</blockquote>
+
+<h2 id="plain-r4-output">Plain R4 output</h2>
+
+<p>Synthea's <code class="language-plaintext highlighter-rouge">--exporter.fhir.use_us_core_ig=false</code> drops the US
+Core profiles and extensions. Same seed, same patient, default output
+directory:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span>-p<span class="w"> </span><span class="m">1</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--exporter.fhir.use_us_core_ig<span class="o">=</span><span class="nb">false</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^1 --|Records'</span>
+<span class="go">SLF4J: No SLF4J providers were found.</span>
+<span class="go">SLF4J: Defaulting to no-operation (NOP) logger implementation</span>
+<span class="go">SLF4J: See http://www.slf4j.org/codes.html#noProviders for further details.</span>
+<span class="go">1 -- Corie618 Sofia418 Beahan375 (101 y/o F) Franklin, Massachusetts  (153177)</span>
+<span class="go">Records: total=1, alive=1, dead=0</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.entry[0].resource'</span><span class="w"> </span>output/fhir/Corie*.json<span class="w"> </span>&gt;<span class="w"> </span>p-plain.json
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>oo.json<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@p-plain.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'localhost:8080/fhir/Patient/$validate'</span>
+<span class="go">200</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.issue<span class="w"> </span><span class="p">|</span><span class="w"> </span>group_by<span class="o">(</span>.severity<span class="o">)[]</span>
+<span class="go">  | "\(length) \(.[0].severity)"' oo.json</span>
+<span class="go">2 information</span>
+<span class="go">1 warning</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.issue<span class="o">[]</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.severity<span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"warning"</span><span class="o">)</span>
+<span class="go">  | .expression[0], .diagnostics' oo.json</span>
+<span class="go">Patient.identifier[2].type</span>
+<span class="go">None of the codings provided are in the value set 'IdentifierType' (http://hl7.org/fhir/ValueSet/identifier-type|4.0.1), and a coding should come from this value set unless it has no suitable code (note that the validator cannot judge what is suitable) (codes = http://terminology.hl7.org/CodeSystem/v2-0203#SS)</span>
+</code></pre></div></div>
+
+<p>No errors. Two information issues remain (Synthea's own extensions, which
+the server has no definitions for) and one warning, which points at
+<code class="language-plaintext highlighter-rouge">Patient.identifier[2].type</code>: the type code on the social security
+number is <code class="language-plaintext highlighter-rouge">SS</code>, and SS isn't in the
+<a href="https://hl7.org/fhir/R4/valueset-identifier-type.html">identifier type value set</a>
+that R4 binds there. The diagnostics spell out why that is only a warning:
+the binding allows other codes when the value set has no suitable one.
+Learn to read severities this way. Errors stop the kata. Warnings and
+information are worth reading once, and then you decide which ones your
+interface accepts.</p>
+
+<h2 id="loading-in-order">Loading in order</h2>
+
+<p>The patient's bundle doesn't contain her doctors or hospitals. It points at
+them by search, with references such as
+<code class="language-plaintext highlighter-rouge">Practitioner?identifier=http://hl7.org/fhir/sid/us-npi|…</code>, and the
+server resolves each one when the transaction runs. So the order matters: the
+hospital bundle, then the practitioner bundle, then the patient.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>ls<span class="w"> </span>output/fhir
+<span class="go">Corie618_Sofia418_Beahan375_ba419d35-0dfe-8af7-347c-eebf02485a56.json</span>
+<span class="go">hospitalInformation1793484816066.json</span>
+<span class="go">practitionerInformation1793484816066.json</span>
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>output/fhir/hospital*.json<span class="w"> </span><span class="se">\</span>
+<span class="w">         </span>output/fhir/practitioner*.json<span class="w"> </span><span class="se">\</span>
+<span class="w">         </span>output/fhir/Corie*.json<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  curl -s -o /dev/null -w "%{http_code} %{time_total}s $f\n" \</span>
+<span class="go">    -H 'Content-Type: application/fhir+json' \</span>
+<span class="go">    --data-binary @"$f" localhost:8080/fhir</span>
+<span class="go">done</span>
+<span class="go">200 0.114475s output/fhir/hospitalInformation1793484816066.json</span>
+<span class="go">200 0.052819s output/fhir/practitionerInformation1793484816066.json</span>
+<span class="go">200 5.689073s output/fhir/Corie618_Sofia418_Beahan375_ba419d35-0dfe-8af7-347c-eebf02485a56.json</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s1">'localhost:8080/fhir/Patient?_summary=count'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">1</span>
+</code></pre></div></div>
+
+<p>About five thousand resources arrived in a few seconds. When we tried the
+patient bundle first on a fresh server, HAPI rejected the whole transaction
+with a 404 (<code class="language-plaintext highlighter-rouge">HAPI-1091: Invalid match URL "Practitioner?identifier=…" -
+No resources match this search</code>) and saved nothing. A transaction is all
+or nothing. That is what you want: half a patient is worse than none.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> the same seed gave the same patient, Corie618
+  Beahan375, and the same MRN in every run, with or without US Core. The
+  hospital and practitioner file names changed from run to run, so we load
+  them with a wildcard.</p>
+</blockquote>
+
+<h1 id="fhir-rest-in-five-minutes">FHIR REST in five minutes</h1>
+
+<p>Everything the kata does is plain HTTP, so we try it with curl before any
+library hides it. Three ideas carry the whole week:</p>
+
+<ul>
+  <li>A resource has a type and an id: <code class="language-plaintext highlighter-rouge">Patient/1015</code>. The id is the
+  server's, assigned when the resource was created.</li>
+  <li>Search returns a Bundle: <code class="language-plaintext highlighter-rouge">GET Patient?identifier=…</code> answers
+  with a list of matches and a <code class="language-plaintext highlighter-rouge">total</code>, even when the list has one
+  entry or none.</li>
+  <li>Read returns one resource: <code class="language-plaintext highlighter-rouge">GET Patient/1015</code> answers with the
+  Patient itself.</li>
+</ul>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">FHIR</span><span class="o">=</span>http://localhost:8080/fhir
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">S</span><span class="o">=</span>http://hospital.smarthealthit.org
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">MRN</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[</span><span class="m">0</span><span class="o">]</span>.resource.identifier<span class="o">[]</span>
+<span class="go">  | select(.system==env.S) | .value' output/fhir/Corie*.json)</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="nv">$MRN</span>
+<span class="go">ba419d35-0dfe-8af7-347c-eebf02485a56</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$S</span><span class="s2">|</span><span class="nv">$MRN</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="err">'</span><span class="o">{</span>resourceType,
+<span class="go">  total, id: .entry[0].resource.id,</span>
+<span class="go">  version: .entry[0].resource.meta.versionId}'</span>
+<span class="go">{</span>
+<span class="go">  "resourceType": "Bundle",</span>
+<span class="go">  "total": 1,</span>
+<span class="go">  "id": "1015",</span>
+<span class="go">  "version": "1"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?_id=</span><span class="nv">$MRN</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">0</span>
+<span class="gp">$ </span><span class="nv">ID</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$S</span><span class="s2">|</span><span class="nv">$MRN</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[0].resource.id'</span><span class="k">)</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$ID</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'{resourceType, id, meta}'</span>
+<span class="go">{"resourceType":"Patient","id":"1015","meta":{"versionId":"1","lastUpdated":"2026-10-31T22:13:40.877+00:00"}}</span>
+</code></pre></div></div>
+
+<p>Look at the two lookups in the middle. The search by identifier finds
+Corie. The search by <code class="language-plaintext highlighter-rouge">_id</code> with her MRN finds nothing:
+<code class="language-plaintext highlighter-rouge">_id</code> is the server's id, and this server called her
+<code class="language-plaintext highlighter-rouge">1015</code>. Server ids aren't MRNs; another server gives her another
+id. The MRN is what the hospital knows her by, printed on her wristband and
+sent in every message about her, so the kata starts from the MRN and
+discovers the id: <code class="language-plaintext highlighter-rouge">identifier=system|value</code>, never
+<code class="language-plaintext highlighter-rouge">_id</code>.</p>
+
+<p>The system half matters as much as the value. MRNs are only unique within
+the organization that issues them, so <code class="language-plaintext highlighter-rouge">100234</code> at one hospital and
+<code class="language-plaintext highlighter-rouge">100234</code> at another are different people. Always search with both
+halves.</p>
+
+<p>The read shows the last idea: <code class="language-plaintext highlighter-rouge">meta.versionId</code>. Each update bumps
+<code class="language-plaintext highlighter-rouge">meta.versionId</code>, the server keeps every version, and
+<code class="language-plaintext highlighter-rouge">lastUpdated</code> records when it changed. The kata uses the version to
+prove a write happened. Concurrency control uses it too: an
+<code class="language-plaintext highlighter-rouge">If-Match</code> header carrying the version you read stops two writers
+clobbering each other. We test that at the end.</p>
+
+<h1 id="the-kata-in-four-stacks">The kata in four stacks</h1>
+
+<p>Each stack gets the server's base URL and the MRN from the environment
+(<code class="language-plaintext highlighter-rouge">FHIR</code> and <code class="language-plaintext highlighter-rouge">MRN</code>, exported above), and the mobile number
+as its argument. Each stack uses a different number, 555-0101 to 555-0104, so
+every run really changes the patient. Download the four projects:
+<a href="static/files/week-0/java/pom.xml">java/pom.xml</a> with
+<a href="static/files/week-0/java/src/main/java/Kata.java">Kata.java</a>,
+<a href="static/files/week-0/csharp/Kata.csproj">csharp/Kata.csproj</a> with
+<a href="static/files/week-0/csharp/Program.cs">Program.cs</a>,
+<a href="static/files/week-0/python/requirements.txt">python/requirements.txt</a> with
+<a href="static/files/week-0/python/kata.py">kata.py</a>, and
+<a href="static/files/week-0/typescript/package.json">typescript/package.json</a> with
+<a href="static/files/week-0/typescript/tsconfig.json">tsconfig.json</a> and
+<a href="static/files/week-0/typescript/src/server.ts">src/server.ts</a>. The
+test patient used at the end is
+<a href="static/files/week-0/test-patient.json">test-patient.json</a>.</p>
+
+<h2 id="java-hapi-fhir">Java: HAPI FHIR client</h2>
+
+<p>HAPI FHIR is the most widely used Java FHIR library, and Java is everywhere
+in hospital integration: Open Integration Engine, the open-source fork of
+Mirth Connect, is written in it. The client is a fluent builder:
+<code class="language-plaintext highlighter-rouge">client.search().byUrl(…).returnBundle(Bundle.class).execute()</code>.
+It hides HTTP well, which is a problem when you want to print status codes,
+so we register an interceptor that remembers the last response:</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">IGenericClient</span><span class="w"> </span><span class="n">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FhirContext</span><span class="p">.</span><span class="na">forR4</span><span class="p">()</span>
+<span class="w">    </span><span class="p">.</span><span class="na">newRestfulGenericClient</span><span class="p">(</span><span class="n">System</span><span class="p">.</span><span class="na">getenv</span><span class="p">(</span><span class="s">"FHIR"</span><span class="p">));</span>
+<span class="n">client</span><span class="p">.</span><span class="na">registerInterceptor</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">IClientInterceptor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">public</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">interceptRequest</span><span class="p">(</span><span class="n">IHttpRequest</span><span class="w"> </span><span class="n">req</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span>
+<span class="w">  </span><span class="kd">public</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">interceptResponse</span><span class="p">(</span><span class="n">IHttpResponse</span><span class="w"> </span><span class="n">res</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">res</span><span class="p">.</span><span class="na">getStatus</span><span class="p">();</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">});</span>
+</code></pre></div></div>
+
+<p>The middle of the kata is two calls. <code class="language-plaintext highlighter-rouge">validate()</code> sends the
+<code class="language-plaintext highlighter-rouge">$validate</code> request; <code class="language-plaintext highlighter-rouge">conditionalByUrl</code> turns an update
+into a conditional PUT:</p>
+
+<div class="language-java highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// 3. $validate: HTTP 200 says nothing; count severities</span>
+<span class="n">OperationOutcome</span><span class="w"> </span><span class="n">oo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">OperationOutcome</span><span class="p">)</span><span class="w"> </span><span class="n">client</span><span class="p">.</span><span class="na">validate</span><span class="p">()</span>
+<span class="w">    </span><span class="p">.</span><span class="na">resource</span><span class="p">(</span><span class="n">p</span><span class="p">).</span><span class="na">execute</span><span class="p">().</span><span class="na">getOperationOutcome</span><span class="p">();</span>
+<span class="n">Map</span><span class="o">&lt;</span><span class="n">String</span><span class="p">,</span><span class="w"> </span><span class="n">Integer</span><span class="o">&gt;</span><span class="w"> </span><span class="n">sev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">TreeMap</span><span class="o">&lt;&gt;</span><span class="p">();</span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">var</span><span class="w"> </span><span class="n">issue</span><span class="w"> </span><span class="p">:</span><span class="w"> </span><span class="n">oo</span><span class="p">.</span><span class="na">getIssue</span><span class="p">())</span>
+<span class="w">  </span><span class="n">sev</span><span class="p">.</span><span class="na">merge</span><span class="p">(</span><span class="n">issue</span><span class="p">.</span><span class="na">getSeverity</span><span class="p">().</span><span class="na">toCode</span><span class="p">(),</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">Integer</span><span class="p">::</span><span class="n">sum</span><span class="p">);</span>
+<span class="n">log</span><span class="p">(</span><span class="s">"validate POST Patient/$validate"</span><span class="p">,</span><span class="w"> </span><span class="n">sev</span><span class="p">.</span><span class="na">toString</span><span class="p">());</span>
+<span class="n">check</span><span class="p">(</span><span class="o">!</span><span class="n">sev</span><span class="p">.</span><span class="na">containsKey</span><span class="p">(</span><span class="s">"fatal"</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">sev</span><span class="p">.</span><span class="na">containsKey</span><span class="p">(</span><span class="s">"error"</span><span class="p">),</span>
+<span class="w">    </span><span class="s">"invalid"</span><span class="p">);</span>
+
+<span class="c1">// 4. Conditional update on the identifier</span>
+<span class="n">client</span><span class="p">.</span><span class="na">update</span><span class="p">().</span><span class="na">resource</span><span class="p">(</span><span class="n">p</span><span class="p">).</span><span class="na">conditionalByUrl</span><span class="p">(</span><span class="n">byMrn</span><span class="p">).</span><span class="na">execute</span><span class="p">();</span>
+<span class="n">log</span><span class="p">(</span><span class="s">"update   PUT  Patient?identifier=S|MRN"</span><span class="p">,</span><span class="w"> </span><span class="s">""</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Build and run it with Maven:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>java
+<span class="gp">$ </span>mvn<span class="w"> </span>-q<span class="w"> </span>compile
+<span class="go">WARNING: A terminally deprecated method in sun.misc.Unsafe has been called</span>
+<span class="go">WARNING: sun.misc.Unsafe::objectFieldOffset has been called by com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper (file:/usr/share/maven/lib/guava.jar)</span>
+<span class="go">WARNING: Please consider reporting this to the maintainers of class com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper</span>
+<span class="go">WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release</span>
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">MAVEN_OPTS</span><span class="o">=</span>--sun-misc-unsafe-memory-access<span class="o">=</span>allow
+<span class="gp">$ </span>mvn<span class="w"> </span>-q<span class="w"> </span>exec:java<span class="w"> </span>-Dexec.args<span class="o">=</span><span class="m">555</span>-0101
+<span class="go">search   GET  Patient?identifier=S|MRN   200  1 match, id 1015, v1</span>
+<span class="go">validate POST Patient/$validate          200  {information=2, warning=1}</span>
+<span class="go">update   PUT  Patient?identifier=S|MRN   200</span>
+<span class="go">re-read  GET  Patient?identifier=S|MRN   200  1 match, v2</span>
+<span class="go">history  GET  Patient/1015/_history      200  2 versions</span>
+<span class="go">PASS java: v1 -&gt; v2, one patient</span>
+</code></pre></div></div>
+
+<p>The first command warns four times before doing anything. Those warnings
+come from Maven 3.8.7 itself: its bundled Guava calls an internal JDK API
+(<code class="language-plaintext highlighter-rouge">sun.misc.Unsafe</code>) that JDK 25 now warns about. They are not
+from our code and not from HAPI. The JDK flag in <code class="language-plaintext highlighter-rouge">MAVEN_OPTS</code>
+allows the old API and silences them; a newer Maven is the real fix.
+Then the kata: version 1 to version 2, one match.</p>
+
+<h2 id="c-firely-sdk">C#: Firely SDK</h2>
+
+<p>The Firely SDK is the standard FHIR library for .NET, and Microsoft's Azure
+FHIR service is built on it. Its <code class="language-plaintext highlighter-rouge">FhirClient</code> is async throughout,
+and it keeps the status of the last response in <code class="language-plaintext highlighter-rouge">LastResult</code>, so
+logging is one line. A conditional update is a method of its own:</p>
+
+<div class="language-csharp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">// LastResult is the response line of the last call</span>
+<span class="k">void</span><span class="w"> </span><span class="nf">Log</span><span class="p">(</span><span class="kt">string</span><span class="w"> </span><span class="n">call</span><span class="p">,</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="n">note</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span>
+<span class="w">    </span><span class="s">$"{call,-40} {client.LastResult?.Status}  {note}"</span><span class="p">.</span><span class="n">TrimEnd</span><span class="p">());</span>
+
+<span class="c1">// 3. $validate: HTTP 200 says nothing; count severities</span>
+<span class="kt">var</span><span class="w"> </span><span class="n">oo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="n">client</span><span class="p">.</span><span class="n">ValidateResourceAsync</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+<span class="kt">var</span><span class="w"> </span><span class="n">sev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">oo</span><span class="p">.</span><span class="n">Issue</span><span class="p">.</span><span class="n">GroupBy</span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">i</span><span class="p">.</span><span class="n">Severity</span><span class="p">.</span><span class="n">ToString</span><span class="p">().</span><span class="n">ToLower</span><span class="p">())</span>
+<span class="w">    </span><span class="p">.</span><span class="n">OrderBy</span><span class="p">(</span><span class="n">g</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">g</span><span class="p">.</span><span class="n">Key</span><span class="p">).</span><span class="n">Select</span><span class="p">(</span><span class="n">g</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="s">$"{g.Key}={g.Count()}"</span><span class="p">);</span>
+<span class="n">Log</span><span class="p">(</span><span class="s">"validate POST Patient/$validate"</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"{"</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="kt">string</span><span class="p">.</span><span class="n">Join</span><span class="p">(</span><span class="s">", "</span><span class="p">,</span><span class="w"> </span><span class="n">sev</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s">"}"</span><span class="p">);</span>
+<span class="n">Check</span><span class="p">(</span><span class="o">!</span><span class="n">oo</span><span class="p">.</span><span class="n">Issue</span><span class="p">.</span><span class="n">Any</span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=&gt;</span>
+<span class="w">    </span><span class="n">i</span><span class="p">.</span><span class="n">Severity</span><span class="w"> </span><span class="k">is</span><span class="w"> </span><span class="n">Severity</span><span class="p">.</span><span class="n">Fatal</span><span class="w"> </span><span class="k">or</span><span class="w"> </span><span class="n">Severity</span><span class="p">.</span><span class="n">Error</span><span class="p">),</span><span class="w"> </span><span class="s">"invalid"</span><span class="p">);</span>
+
+<span class="c1">// 4. Conditional update on the identifier</span>
+<span class="k">await</span><span class="w"> </span><span class="n">client</span><span class="p">.</span><span class="n">ConditionalUpdateAsync</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="n">byMrn</span><span class="p">);</span>
+<span class="n">Log</span><span class="p">(</span><span class="s">"update   PUT  Patient?identifier=S|MRN"</span><span class="p">,</span><span class="w"> </span><span class="s">""</span><span class="p">);</span>
+</code></pre></div></div>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>csharp
+<span class="gp">$ </span>dotnet<span class="w"> </span>build<span class="w"> </span>-v<span class="w"> </span>q<span class="w"> </span>--nologo
+
+<span class="go">Build succeeded.</span>
+<span class="go">    0 Warning(s)</span>
+<span class="go">    0 Error(s)</span>
+
+<span class="go">Time Elapsed 00:00:01.71</span>
+<span class="gp">$ </span>dotnet<span class="w"> </span>run<span class="w"> </span>--no-build<span class="w"> </span>--<span class="w"> </span><span class="m">555</span>-0102
+<span class="go">search   GET  Patient?identifier=S|MRN   200  1 match, id 1015, v2</span>
+<span class="go">validate POST Patient/$validate          200  {information=2, warning=1}</span>
+<span class="go">update   PUT  Patient?identifier=S|MRN   200</span>
+<span class="go">re-read  GET  Patient?identifier=S|MRN   200  1 match, v3</span>
+<span class="go">history  GET  Patient/1015/_history      200  3 versions</span>
+<span class="go">PASS csharp: v2 -&gt; v3, one patient</span>
+<span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>~/.nuget/packages/hl7.fhir.base/6.8.0/lib/net8.0
+<span class="gp">$ </span>grep<span class="w"> </span>-c<span class="w"> </span>ValidateResourceAsync<span class="w"> </span>Hl7.Fhir.Base.dll<span class="w"> </span>Hl7.Fhir.Base.xml
+<span class="go">Hl7.Fhir.Base.dll:3</span>
+<span class="go">Hl7.Fhir.Base.xml:0</span>
+</code></pre></div></div>
+
+<p>Version 2 to 3. The last two commands show the gotcha in the table below:
+<code class="language-plaintext highlighter-rouge">ValidateResourceAsync</code> is in the compiled library but not in its
+XML documentation file, so your editor shows no help for it. If you search the
+docs for “validate” and find nothing, the method still exists.</p>
+
+<h2 id="python-fhirclient">Python: fhirclient</h2>
+
+<p>fhirclient is the SMART on FHIR project's Python client. It gives you model
+classes for every R4 resource (<code class="language-plaintext highlighter-rouge">Patient</code>,
+<code class="language-plaintext highlighter-rouge">ContactPoint</code>, <code class="language-plaintext highlighter-rouge">OperationOutcome</code>) and search through
+<code class="language-plaintext highlighter-rouge">Patient.where(…).perform(server)</code>. It has no helper for a
+conditional update, so we drop down to <code class="language-plaintext highlighter-rouge">server.put_json</code>, and it
+doesn't expose status codes, so we hook the <code class="language-plaintext highlighter-rouge">requests</code> session it
+uses underneath. Here is the whole kata:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="sd">"""Week 0 kata: find by MRN, add a mobile, $validate,</span>
+<span class="sd">conditional PUT, prove exactly one write."""</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections</span><span class="w"> </span><span class="kn">import</span> <span class="n">Counter</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">fhirclient</span><span class="w"> </span><span class="kn">import</span> <span class="n">client</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fhirclient.models.contactpoint</span><span class="w"> </span><span class="kn">import</span> <span class="n">ContactPoint</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fhirclient.models.operationoutcome</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">OperationOutcome</span><span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fhirclient.models.patient</span><span class="w"> </span><span class="kn">import</span> <span class="n">Patient</span>
+
+<span class="n">S</span> <span class="o">=</span> <span class="s2">"http://hospital.smarthealthit.org"</span>
+<span class="n">mrn</span><span class="p">,</span> <span class="n">mobile</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"MRN"</span><span class="p">],</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+<span class="n">by_mrn</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"Patient?identifier=</span><span class="si">{</span><span class="n">S</span><span class="si">}</span><span class="s2">|</span><span class="si">{</span><span class="n">mrn</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="n">smart</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">FHIRClient</span><span class="p">(</span><span class="n">settings</span><span class="o">=</span><span class="p">{</span>
+    <span class="s2">"app_id"</span><span class="p">:</span> <span class="s2">"kata"</span><span class="p">,</span> <span class="s2">"api_base"</span><span class="p">:</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"FHIR"</span><span class="p">]})</span>
+<span class="n">server</span> <span class="o">=</span> <span class="n">smart</span><span class="o">.</span><span class="n">server</span>
+<span class="n">status</span> <span class="o">=</span> <span class="kc">None</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">remember</span><span class="p">(</span><span class="n">res</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">global</span> <span class="n">status</span>
+    <span class="n">status</span> <span class="o">=</span> <span class="n">res</span><span class="o">.</span><span class="n">status_code</span>
+
+
+<span class="c1"># fhirclient hides HTTP; a requests hook shows us each status</span>
+<span class="n">server</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">hooks</span><span class="p">[</span><span class="s2">"response"</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">remember</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">log</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">note</span><span class="o">=</span><span class="s2">""</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">call</span><span class="si">:</span><span class="s2">&lt;40</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">status</span><span class="si">}</span><span class="s2">  </span><span class="si">{</span><span class="n">note</span><span class="si">}</span><span class="s2">"</span><span class="o">.</span><span class="n">rstrip</span><span class="p">())</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span><span class="n">ok</span><span class="p">,</span> <span class="n">why</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">ok</span><span class="p">:</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="sa">f</span><span class="s2">"FAIL python: </span><span class="si">{</span><span class="n">why</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">search</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">Patient</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+        <span class="p">{</span><span class="s2">"identifier"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">S</span><span class="si">}</span><span class="s2">|</span><span class="si">{</span><span class="n">mrn</span><span class="si">}</span><span class="s2">"</span><span class="p">})</span><span class="o">.</span><span class="n">perform</span><span class="p">(</span><span class="n">server</span><span class="p">)</span>
+
+
+<span class="c1"># 1. Search by identifier (never _id: server id is not the MRN)</span>
+<span class="n">found</span> <span class="o">=</span> <span class="n">search</span><span class="p">()</span>
+<span class="n">check</span><span class="p">(</span><span class="n">found</span><span class="o">.</span><span class="n">total</span> <span class="o">==</span> <span class="mi">1</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"expected 1 match, got </span><span class="si">{</span><span class="n">found</span><span class="o">.</span><span class="n">total</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">found</span><span class="o">.</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">resource</span>
+<span class="n">before</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">versionId</span><span class="p">)</span>
+<span class="n">log</span><span class="p">(</span><span class="s2">"search   GET  Patient?identifier=S|MRN"</span><span class="p">,</span>
+    <span class="sa">f</span><span class="s2">"1 match, id </span><span class="si">{</span><span class="n">p</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2">, v</span><span class="si">{</span><span class="n">before</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="c1"># 2. Replace any mobile number with ours</span>
+<span class="n">p</span><span class="o">.</span><span class="n">telecom</span> <span class="o">=</span> <span class="p">[</span><span class="n">t</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">p</span><span class="o">.</span><span class="n">telecom</span> <span class="ow">or</span> <span class="p">[]</span> <span class="k">if</span> <span class="n">t</span><span class="o">.</span><span class="n">use</span> <span class="o">!=</span> <span class="s2">"mobile"</span><span class="p">]</span>
+<span class="n">p</span><span class="o">.</span><span class="n">telecom</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ContactPoint</span><span class="p">(</span>
+    <span class="p">{</span><span class="s2">"system"</span><span class="p">:</span> <span class="s2">"phone"</span><span class="p">,</span> <span class="s2">"use"</span><span class="p">:</span> <span class="s2">"mobile"</span><span class="p">,</span> <span class="s2">"value"</span><span class="p">:</span> <span class="n">mobile</span><span class="p">}))</span>
+
+<span class="c1"># 3. $validate: HTTP 200 says nothing; count the severities</span>
+<span class="n">res</span> <span class="o">=</span> <span class="n">server</span><span class="o">.</span><span class="n">post_json</span><span class="p">(</span><span class="s2">"Patient/$validate"</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">as_json</span><span class="p">())</span>
+<span class="n">oo</span> <span class="o">=</span> <span class="n">OperationOutcome</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">json</span><span class="p">())</span>
+<span class="n">sev</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span><span class="n">i</span><span class="o">.</span><span class="n">severity</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">oo</span><span class="o">.</span><span class="n">issue</span><span class="p">)</span>
+<span class="n">log</span><span class="p">(</span><span class="s2">"validate POST Patient/$validate"</span><span class="p">,</span>
+    <span class="s2">"{"</span> <span class="o">+</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">k</span><span class="si">}</span><span class="s2">=</span><span class="si">{</span><span class="n">n</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">sev</span><span class="o">.</span><span class="n">items</span><span class="p">()))</span>
+    <span class="o">+</span> <span class="s2">"}"</span><span class="p">)</span>
+<span class="n">check</span><span class="p">(</span><span class="ow">not</span> <span class="p">{</span><span class="s2">"fatal"</span><span class="p">,</span> <span class="s2">"error"</span><span class="p">}</span> <span class="o">&amp;</span> <span class="n">sev</span><span class="o">.</span><span class="n">keys</span><span class="p">(),</span> <span class="s2">"invalid"</span><span class="p">)</span>
+
+<span class="c1"># 4. Conditional update on the identifier (no helper for it)</span>
+<span class="n">server</span><span class="o">.</span><span class="n">put_json</span><span class="p">(</span><span class="n">by_mrn</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">as_json</span><span class="p">())</span>
+<span class="n">log</span><span class="p">(</span><span class="s2">"update   PUT  Patient?identifier=S|MRN"</span><span class="p">)</span>
+
+<span class="c1"># 5. Read back: still one patient, one version more</span>
+<span class="n">again</span> <span class="o">=</span> <span class="n">search</span><span class="p">()</span>
+<span class="n">after</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">again</span><span class="o">.</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">resource</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">versionId</span><span class="p">)</span>
+<span class="n">log</span><span class="p">(</span><span class="s2">"re-read  GET  Patient?identifier=S|MRN"</span><span class="p">,</span>
+    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">again</span><span class="o">.</span><span class="n">total</span><span class="si">}</span><span class="s2"> match, v</span><span class="si">{</span><span class="n">after</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">check</span><span class="p">(</span><span class="n">again</span><span class="o">.</span><span class="n">total</span> <span class="o">==</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">"duplicate patient"</span><span class="p">)</span>
+<span class="n">check</span><span class="p">(</span><span class="n">after</span> <span class="o">==</span> <span class="n">before</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"expected v</span><span class="si">{</span><span class="n">before</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2">, got v</span><span class="si">{</span><span class="n">after</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="c1"># 6. History holds every version: none lost, none extra</span>
+<span class="n">hist</span> <span class="o">=</span> <span class="n">server</span><span class="o">.</span><span class="n">request_json</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Patient/</span><span class="si">{</span><span class="n">p</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2">/_history"</span><span class="p">)</span>
+<span class="n">log</span><span class="p">(</span><span class="sa">f</span><span class="s2">"history  GET  Patient/</span><span class="si">{</span><span class="n">p</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2">/_history"</span><span class="p">,</span>
+    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">hist</span><span class="p">[</span><span class="s1">'total'</span><span class="p">]</span><span class="si">}</span><span class="s2"> versions"</span><span class="p">)</span>
+<span class="n">check</span><span class="p">(</span><span class="n">hist</span><span class="p">[</span><span class="s2">"total"</span><span class="p">]</span> <span class="o">==</span> <span class="n">after</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"history has </span><span class="si">{</span><span class="n">hist</span><span class="p">[</span><span class="s1">'total'</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"PASS python: v</span><span class="si">{</span><span class="n">before</span><span class="si">}</span><span class="s2"> -&gt; v</span><span class="si">{</span><span class="n">after</span><span class="si">}</span><span class="s2">, one patient"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>python
+<span class="gp">$ </span>cat<span class="w"> </span>requirements.txt
+<span class="go">fhirclient==4.4.0</span>
+<span class="gp">$ </span>python3<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv
+<span class="gp">$ </span>.venv/bin/pip<span class="w"> </span>install<span class="w"> </span>-q<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+<span class="gp">$ </span>.venv/bin/python<span class="w"> </span>kata.py<span class="w"> </span><span class="m">555</span>-0103
+<span class="go">search   GET  Patient?identifier=S|MRN   200  1 match, id 1015, v3</span>
+<span class="go">validate POST Patient/$validate          200  {information=2, warning=1}</span>
+<span class="go">update   PUT  Patient?identifier=S|MRN   200</span>
+<span class="go">re-read  GET  Patient?identifier=S|MRN   200  1 match, v4</span>
+<span class="go">history  GET  Patient/1015/_history      200  4 versions</span>
+<span class="go">PASS python: v3 -&gt; v4, one patient</span>
+</code></pre></div></div>
+
+<h2 id="typescript-fhirclient-and-express">TypeScript: fhirclient and Express</h2>
+
+<p>The JavaScript fhirclient comes from the same SMART project, and its main
+job is SMART on FHIR: apps launched from inside an EHR, which week 4 builds.
+On a server, you import <code class="language-plaintext highlighter-rouge">fhirclient/node</code> and create a client per
+HTTP request with <code class="language-plaintext highlighter-rouge">smart(req, res)</code>, because a SMART launch is a
+conversation with the user's browser. So in TypeScript the kata is an Express
+route, and you run it with curl:</p>
+
+<div class="language-typescript highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/kata/:mobile"</span><span class="p">,</span><span class="w"> </span><span class="k">async</span><span class="w"> </span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">smart</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">).</span><span class="nx">client</span><span class="p">(</span><span class="nx">FHIR</span><span class="p">);</span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">out</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">[]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[];</span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span>
+
+<span class="w">  </span><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">call</span><span class="o">&lt;</span><span class="nx">T</span><span class="o">&gt;</span><span class="p">(</span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="o">:</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">body?</span><span class="o">:</span><span class="w"> </span><span class="kt">object</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">request</span><span class="o">&lt;</span><span class="p">{</span><span class="w"> </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="kt">T</span><span class="p">;</span><span class="w"> </span><span class="nx">response</span><span class="o">:</span><span class="w"> </span><span class="kt">Response</span><span class="w"> </span><span class="p">}</span><span class="o">&gt;</span><span class="p">({</span>
+<span class="w">      </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="p">,</span><span class="w"> </span><span class="nx">includeResponse</span><span class="o">:</span><span class="w"> </span><span class="kt">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">"content-type"</span><span class="o">:</span><span class="w"> </span><span class="s2">"application/fhir+json"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">      </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="kt">body</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">body</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="w">    </span><span class="nx">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+<span class="w">  </span><span class="p">}</span>
+</code></pre></div></div>
+
+<p>Asking for <code class="language-plaintext highlighter-rouge">includeResponse: true</code> returns the response next to
+the body, which is how we get the status. TypeScript checks our use of FHIR
+types at build time, through the type definitions fhirclient pulls in, so
+<code class="language-plaintext highlighter-rouge">found.entry![0].resource!</code> has to admit that a Bundle might be
+empty.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>typescript
+<span class="gp">$ </span>npm<span class="w"> </span>install<span class="w"> </span>--no-audit<span class="w"> </span>--no-fund
+
+<span class="go">added 82 packages in 2s</span>
+<span class="gp">$ </span>npm<span class="w"> </span>run<span class="w"> </span>build
+
+<span class="go">&gt; build</span>
+<span class="go">&gt; tsc</span>
+<span class="gp">$ </span>node<span class="w"> </span>dist/server.js<span class="w"> </span><span class="p">&amp;</span><span class="w"> </span>sleep<span class="w"> </span><span class="m">2</span>
+<span class="go">kata on http://localhost:3000/kata/:mobile</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:3000/kata/555-0104
+<span class="go">search   GET  Patient?identifier=S|MRN   200  1 match, id 1015, v4</span>
+<span class="go">validate POST Patient/$validate          200  {information=2, warning=1}</span>
+<span class="go">update   PUT  Patient?identifier=S|MRN   200</span>
+<span class="go">re-read  GET  Patient?identifier=S|MRN   200  1 match, v5</span>
+<span class="go">history  GET  Patient/1015/_history      200  5 versions</span>
+<span class="go">PASS typescript: v4 -&gt; v5, one patient</span>
+<span class="gp">$ </span><span class="nb">kill</span><span class="w"> </span>%1
+</code></pre></div></div>
+
+<p>We didn't need express-session here, because we never ran a SMART launch:
+our server is open and needs no authorization. In a SMART app the library
+keeps the launch state in <code class="language-plaintext highlighter-rouge">req.session</code> between the redirect to
+the authorization server and the return; that is why the table says SMART
+needs express-session.</p>
+
+<h2 id="what-differs">What differs, and what doesn't</h2>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Stack</th><th>Library (tested)</th><th>Gotcha we hit</th></tr></thead>
+<tbody>
+<tr><td>Java</td><td>HAPI FHIR 8.2, HAPI HL7v2 2.6 (OIE itself is Java)</td><td>Default HL7v2 validation rejects a bad PID-7</td></tr>
+<tr><td>C#</td><td>Firely SDK 6.8 on .NET 8 (Azure's FHIR service is built on it)</td><td><code class="language-plaintext highlighter-rouge">ValidateResourceAsync</code> is missing from the XML docs</td></tr>
+<tr><td>Python</td><td>fhirclient 4.4, python-hl7 0.4.5</td><td><code class="language-plaintext highlighter-rouge">fhir.resources</code> no longer ships R4</td></tr>
+<tr><td>TypeScript</td><td>fhirclient 3.0, Express</td><td>Import <code class="language-plaintext highlighter-rouge">fhirclient/node</code>; SMART needs express-session</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>We installed those versions of the FHIR clients: HAPI FHIR 8.2.2,
+Hl7.Fhir.R4 6.8.0, fhirclient 4.4.0 and fhirclient 3.0.1. The HL7 v2 libraries
+belong to week 3 and the extras; we didn't install them this week, and we
+didn't re-run the HL7v2 and <code class="language-plaintext highlighter-rouge">fhir.resources</code> gotchas.</p>
+
+<p>The shape is identical in all four; the friction moves around. Java needs
+the most ceremony: a build file, a fluent API and an interceptor just to see
+status codes. C# came out shortest (66 lines against 86 to 98 for the
+others), because conditional update, validation and history are each one
+method. Python's library stops at search, so the write is raw JSON. TypeScript
+made us think about the request we run inside, which pays off once there is a
+real user and a real login. After each run, write down what was easier or
+harder; that note is what you bring to an interview.</p>
+
+<h1 id="proving-one-write">Proving exactly one write</h1>
+
+<p>Each kata asserted its own write. Now check the total from outside, with the
+server's history, which holds every version of the resource:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$S</span><span class="s2">|</span><span class="nv">$MRN</span><span class="s2">&amp;_summary=count"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">1</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$ID</span><span class="s2">/_history"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>
+<span class="go">  | [.resource.meta.versionId, .request.method,</span>
+<span class="go">     (.resource.telecom | map(select(.use=="mobile").value)</span>
+<span class="go">      | join(","))] | @tsv'</span>
+<span class="go">5	PUT	555-0104</span>
+<span class="go">4	PUT	555-0103</span>
+<span class="go">3	PUT	555-0102</span>
+<span class="go">2	PUT	555-0101</span>
+<span class="go">1	POST	</span>
+<span class="gp">$ </span><span class="nb">cd</span><span class="w"> </span>python<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>.venv/bin/python<span class="w"> </span>kata.py<span class="w"> </span><span class="m">555</span>-0104<span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"exit </span><span class="nv">$?</span><span class="s2">"</span>
+<span class="go">search   GET  Patient?identifier=S|MRN   200  1 match, id 1015, v5</span>
+<span class="go">validate POST Patient/$validate          200  {information=2, warning=1}</span>
+<span class="go">update   PUT  Patient?identifier=S|MRN   200</span>
+<span class="go">re-read  GET  Patient?identifier=S|MRN   200  1 match, v5</span>
+<span class="go">FAIL python: expected v6, got v5</span>
+<span class="go">exit 1</span>
+</code></pre></div></div>
+
+<p>Still one patient with that MRN, and five versions: the original load, then
+one PUT per stack, each with its own mobile number. That is the proof: the
+count shows no duplicate was created, and the history shows exactly one new
+version per run, so nothing was lost and nothing was written twice.</p>
+
+<p>The last command is the interesting one. We ran the Python kata again with
+the number TypeScript had already written. The PUT answered 200, but the
+version stayed at 5 and the kata failed: HAPI saw that nothing had changed and
+created no version. That is good behaviour, since an interface that receives
+the same update twice shouldn't grow the history, and the failure is honest:
+the kata was asked to prove a write, and none happened. Exercise 3 asks you to
+tell those two cases apart.</p>
+
+<h1 id="conditional-updates-and-their-failure-modes">Conditional updates and their failure modes</h1>
+
+<p>A conditional update is
+<code class="language-plaintext highlighter-rouge">PUT Patient?identifier=…</code>: the server runs the search, and what it
+does depends on how many matches it finds. It updates one match, creates if
+none, and fails with 412 if several. The
+<a href="https://hl7.org/fhir/R4/http.html#cond-update">specification</a> lists
+those cases (and a fourth: one match, but the body carries a different id,
+which is a 400). Notice that the R4 specification still marks conditional
+create, update, patch and delete as trial use. Servers differ at the edges,
+so test the one you deploy against.</p>
+
+<h2 id="creates-if-none">Creates if none</h2>
+
+<p>The test patient is hand-made, with an <code class="language-plaintext highlighter-rouge">example.org</code> identifier
+system so that nobody mistakes it for a real MRN:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">H</span><span class="o">=</span><span class="s1">'Content-Type: application/fhir+json'</span>
+<span class="gp">$ </span>cat<span class="w"> </span>test-patient.json
+<span class="go">{</span>
+<span class="go">  "resourceType": "Patient",</span>
+<span class="go">  "identifier": [</span>
+<span class="go">    {"system": "http://example.org/mrn", "value": "100235"}</span>
+<span class="go">  ],</span>
+<span class="go">  "name": [{"family": "Kata", "given": ["Test"]}],</span>
+<span class="go">  "telecom": [{"system": "phone", "value": "555-0100", "use": "home"}],</span>
+<span class="go">  "birthDate": "1980-02-14"</span>
+<span class="go">}</span>
+<span class="gp">$ </span><span class="nv">Q</span><span class="o">=</span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=http://example.org/mrn|100235"</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>@test-patient.json<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span>
+<span class="go">201</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>@test-patient.json<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span>
+<span class="go">200</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'[.total, .entry[0].resource.meta.versionId]'</span>
+<span class="go">[1,"1"]</span>
+</code></pre></div></div>
+
+<p>201 Created the first time, 200 the second, and still one patient at
+version 1: the second PUT matched the first patient and, as before, changed
+nothing. This is the upsert that interfaces want. A sender can repeat a
+message as often as it likes, and the record ends up the same.</p>
+
+<h2 id="post-is-not-an-upsert">POST is not an upsert</h2>
+
+<p>Now do what the conditional PUT replaces: POST the same patient twice.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">H</span><span class="o">=</span><span class="s1">'Content-Type: application/fhir+json'</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.identifier[0].value="100236"'</span><span class="w"> </span>test-patient.json<span class="w"> </span>&gt;<span class="w"> </span>dupe.json
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>i<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="go">  curl -s -o /dev/null -w '%{http_code}\n' -H "$H" \</span>
+<span class="go">    -d @dupe.json "$FHIR/Patient"</span>
+<span class="go">done</span>
+<span class="go">201</span>
+<span class="go">201</span>
+<span class="gp">$ </span><span class="nv">Q</span><span class="o">=</span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=http://example.org/mrn|100236"</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">&amp;_summary=count"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">2</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>oo.json<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>@dupe.json<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span>
+<span class="go">412</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.issue[0].diagnostics'</span><span class="w"> </span>oo.json
+<span class="go">HAPI-0988: Failed to UPDATE Patient with match URL "Patient?identifier=http://example.org/mrn|100236" because this search matched 2 resources</span>
+</code></pre></div></div>
+
+<p>Watch out for using POST for upserts: two POSTs made two patients in our
+test, with the same MRN, and the server accepted both without complaint,
+because a plain create doesn't search first. Now the
+conditional PUT can't decide which record to update, so it refuses with 412
+Precondition Failed. That refusal is the right answer and it is also bad news:
+a person now has to work out whether these are one patient or two and merge
+them. Keep POST for things that are new by definition, and use conditional
+writes for anything that might be repeated. Synthea's patient bundle uses plain
+POSTs, so that is worth remembering before you load it twice
+(exercise 4).</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> the same rules apply, and the identifier shared
+  across organizations is usually the provincial health card number. The R4
+  identifier type value set we met above includes <code class="language-plaintext highlighter-rouge">JHN</code>,
+  jurisdictional health number, for it. Canada's counterpart of US Core is
+  <a href="https://simplifier.net/guide/CA-Core/Index/Home.page.md?version=current">CA Core+</a>,
+  led by Canada Health Infoway; we didn't validate against it here.</p>
+</blockquote>
+
+<h2 id="version-aware-updates-with-if-match">Version-aware updates with If-Match</h2>
+
+<p>The last problem is two writers. Registration and a patient portal both read
+version 1, both change something, both write. Without a check, the second write
+silently undoes the first. The fix is to send the version you read in an
+<code class="language-plaintext highlighter-rouge">If-Match</code> header, so the server refuses the write if someone got
+there first. Try it on the test patient: one write with the right version,
+then a second write that still claims version 1, then the same stale header on
+a conditional PUT:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">H</span><span class="o">=</span><span class="s1">'Content-Type: application/fhir+json'</span>
+<span class="gp">$ </span><span class="nv">Q</span><span class="o">=</span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=http://example.org/mrn|100235"</span>
+<span class="gp">$ </span><span class="nv">T</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[0].resource.id'</span><span class="k">)</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$T</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'.active=false'</span><span class="w"> </span>&gt;<span class="w"> </span>t.json
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'If-Match: W/"1"'</span><span class="w"> </span>-d<span class="w"> </span>@t.json<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$T</span><span class="s2">"</span>
+<span class="go">200</span>
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.active=true'</span><span class="w"> </span>t.json<span class="w"> </span>&gt;<span class="w"> </span>t2.json
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>oo.json<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'If-Match: W/"1"'</span><span class="w"> </span>-d<span class="w"> </span>@t2.json<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$T</span><span class="s2">"</span>
+<span class="go">409</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.issue[0].diagnostics'</span><span class="w"> </span>oo.json
+<span class="go">HAPI-0550: HAPI-0989: Trying to update Patient/5766/_history/1 but this is not the current version</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">'%{http_code}\n'</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>-H<span class="w"> </span><span class="s2">"</span><span class="nv">$H</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">'If-Match: W/"1"'</span><span class="w"> </span>-d<span class="w"> </span>@t2.json<span class="w"> </span><span class="s2">"</span><span class="nv">$Q</span><span class="s2">"</span>
+<span class="go">200</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$FHIR</span><span class="s2">/Patient/</span><span class="nv">$T</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'[.meta.versionId, .active]'</span>
+<span class="go">["3",true]</span>
+</code></pre></div></div>
+
+<p>The first write made version 2. The stale write was refused, but with 409
+Conflict, although the specification says a server
+<a href="https://hl7.org/fhir/R4/http.html#concurrency">returns 412 Precondition Failed</a>
+when the version doesn't match; client code that only checks for 412 will
+miss it. And the conditional PUT ignored the stale header and made version 3.
+If you need both, find the record by identifier, then update it by id with
+<code class="language-plaintext highlighter-rouge">If-Match</code>, and treat 409 and 412 the same.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> the 409 and the ignored header are what HAPI
+  FHIR 8.12.0 did. We didn't try other servers; run this session against the
+  one you deploy before you rely on either behaviour.</p>
+</blockquote>
+
+<h1 id="awareness-stacks">Awareness stacks</h1>
+
+<p>You will meet more than four stacks. <strong>Awareness, in Docker:</strong>
+PowerShell, InterSystems IRIS (use InterSystems' registry; Docker Hub's image
+crashed for us) and MUMPS via YottaDB. PowerShell turns up in Windows-heavy
+hospital IT for scripting servers and interfaces. InterSystems IRIS is the
+platform under InterSystems' health products, including the HealthShare
+Health Connect integration engine. MUMPS is a programming language with its
+own built-in database, and YottaDB is an open-source implementation of it.
+An hour with each
+in a container is enough to recognise them in a job description. Those notes
+are from earlier runs of this course; we didn't re-run them for this page.</p>
+
+<p>Pick the stack you want to be hired into and go deep: make its kata yours,
+then add the extras in the exercises. Give the other three an hour or two each,
+enough to read their code and run it.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> let it scaffold files in an unfamiliar
+  stack; write the assertions yourself.</p>
+</blockquote>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>Your main stack's kata passes; the other three run.</li>
+  <li>You can explain every request: method, URL, status.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>Why can't you look a patient up by <code class="language-plaintext highlighter-rouge">_id</code> when all you hold is
+  an MRN? Use the two searches from the REST section in your answer, and say
+  why a hard-coded server id is a bug even though Corie was
+  <code class="language-plaintext highlighter-rouge">Patient/1015</code> on every fresh server we started.</li>
+  <li>What does a conditional PUT do when two patients match? Reproduce the
+  412 from your main stack's client, and make your kata print the
+  OperationOutcome's diagnostics instead of a stack trace.</li>
+  <li>How do you prove exactly one write happened? Change your kata so that
+  a second run with the same number reports “no change, still v5” and passes,
+  while a run that creates a second patient or skips a version still
+  fails.</li>
+  <li>POST the patient bundle a second time. How many patients have Corie's
+  MRN now? Look at the <code class="language-plaintext highlighter-rouge">request</code> of the first entry in the patient
+  bundle and of the first entry in the hospital bundle, and explain why only
+  one of them is safe to load twice.</li>
+  <li>Add <code class="language-plaintext highlighter-rouge">If-Match</code> to your main stack's kata: search by
+  identifier, then update by id with the version you read. Run two copies at
+  once with different numbers. One should fail with 409 (on HAPI) or 412;
+  make the kata say which.</li>
+  <li>Validate the US Core version of Corie with the HL7 validator
+  (<code class="language-plaintext highlighter-rouge">validator_cli.jar</code> from the lab downloads, with the US Core
+  package loaded) instead of the server. Which of the two errors disappear,
+  and do new ones appear?</li>
+  <li>Java extra: with HAPI HL7v2, parse an ADT message with an impossible
+  birth date in <code class="language-plaintext highlighter-rouge">PID-7</code> and answer it with an AE acknowledgment
+  rather than an exception. Week 3 has sample messages.</li>
+  <li>Python extra: write a function that strips a Patient down to an
+  allowlist of elements before it is logged or exported, so no identifier can
+  leave by accident. Test it on Corie, who carries an SSN, a driver's licence
+  and a passport number.</li>
+  <li>TypeScript extra: turn the Express app into a SMART app that lists the
+  patient's lab results, with express-session holding the launch state.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://hl7.org/fhir/R4/http.html">FHIR RESTful API</a></li>
+  <li><a href="https://hapifhir.io/">HAPI FHIR</a></li>
+  <li><a href="https://docs.fire.ly/">Firely SDK</a></li>
+  <li><a href="https://github.com/smart-on-fhir/client-js">fhirclient</a></li>
+  <li><a href="https://hl7.org/fhir/R4/resource-operation-validate.html">FHIR R4: the $validate operation</a></li>
+  <li><a href="https://hl7.org/fhir/R4/operationoutcome.html">FHIR R4: OperationOutcome</a></li>
+  <li><a href="https://hapifhir.io/hapi-fhir/docs/client/generic_client.html">HAPI FHIR: the generic client</a></li>
+  <li><a href="https://docs.fire.ly/projects/Firely-NET-SDK/en/latest/">Firely .NET SDK documentation</a></li>
+  <li><a href="https://github.com/smart-on-fhir/client-py">fhirclient for Python (client-py)</a></li>
+  <li><a href="https://docs.smarthealthit.org/client-js/">SMART JavaScript client library documentation</a></li>
+  <li><a href="https://github.com/synthetichealth/synthea/wiki/Common-Configuration">Synthea: common configuration</a></li>
+  <li><a href="https://hl7.org/fhir/us/core/">US Core implementation guide</a></li>
+  <li><a href="https://simplifier.net/guide/CA-Core/Index/Home.page.md?version=current">CA Core+ implementation guide</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

@@ -1,0 +1,40 @@
+# Week 6 lab: sender -> OIE (6661) -> bridge (2575) -> HAPI
+# Images are pinned by digest: "latest" moves, a digest
+# doesn't. These are HAPI FHIR 8.12.0, OIE 4.5.2 and
+# Python 3.12-slim as tested on 31 Oct 2026.
+services:
+  hapi:
+    image: hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543c30a44f865b80ca04e
+    ports: ["8080:8080"]
+
+  bridge:
+    image: python@sha256:d75c4b6cdd039ae966a34cd3ccab9e0e5f7299280ad76fe1744882d86eedce0b
+    working_dir: /app
+    volumes: ["./bridge.py:/app/bridge.py:ro"]
+    environment:
+      FHIR_BASE: http://hapi:8080/fhir
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_ROOT_USER_ACTION: ignore
+    command: sh -c "pip install -q hl7==0.4.5 && python bridge.py"
+    ports: ["2575:2575"]
+    depends_on: [hapi]
+    healthcheck:
+      # healthy = listening on 2575 AND HAPI answers
+      test: ["CMD", "python", "-c", "import socket, urllib.request as u;
+        socket.create_connection(('localhost', 2575));
+        u.urlopen('http://hapi:8080/fhir/metadata')"]
+      interval: 5s
+      retries: 40
+      start_period: 180s
+
+  oie:
+    image: openintegrationengine/engine@sha256:d48bf93e933f85180f0ae4a94c13f4e5d38bac3ea53468fbb9ee03bbc0d94b14
+    ports: ["8443:8443", "6661:6661"]
+    depends_on: [bridge]
+    healthcheck:
+      test: ["CMD", "curl", "-skf", "-o", "/dev/null",
+        "-u", "admin:admin", "-H", "X-Requested-With: OpenAPI",
+        "https://localhost:8443/api/server/version"]
+      interval: 5s
+      retries: 40
+      start_period: 120s

@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 2 of the Health IT Missing Semester: Data + SQL.">
+
+  <title>Data + SQL &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">Data + SQL</h1>
+<h2 class="subtitle">Week 2 · ~10 h</h2>
+
+<p>Much of the job is answering questions from clinical data. A quality nurse
+wants to know which patients with diabetes are badly controlled. An emergency
+department manager wants visits per month to plan staffing. A researcher wants
+everyone whose blood pressure was high last year. Each request sounds like one
+query, and each one hides decisions: which code counts as diabetes, what “last
+year” means, whether the count is of patients or of visits, what unit the number
+is in. The data is coded, unit-laden and messy, so two honest queries can
+disagree, and you have to explain why.</p>
+
+<p>Getting this wrong has consequences you can't see from the query. Count
+encounters instead of patients and a clinic looks busier than it is. Compare a
+glucose in mg/dL against a threshold in mmol/L and every patient becomes
+diabetic. Search on display text and patients with prediabetes land on a
+diabetes outreach list. Lose a care gap in a join and the patient who most
+needs a phone call never gets one.</p>
+
+<p>This lecture generates one synthetic population, exports it twice (as CSV
+and as FHIR), loads the CSV into PostgreSQL and answers five clinical
+questions twice: once in SQL, once with jq over the FHIR files. Then we explain
+every number that differs. Along the way we look at the code systems that make
+clinical data comparable, a clinical note that holds facts the codes don't, a
+FHIR search against a local server, and the Canadian version of the data.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab:
+Synthea (master build of 21 Oct 2026), PostgreSQL 16.11 in Docker
+(<code class="language-plaintext highlighter-rouge">postgres:16-alpine</code>), jq 1.7 and a local HAPI FHIR 8.12.0
+server. The outputs are
+copied from one run. Yours will differ in timestamps and container ids;
+with the same seeds, the patients and counts should match.</p>
+
+<h1 id="one-population-two-exports">One population, two exports</h1>
+
+<p>We start with data we are allowed to break. Synthea simulates patients from
+birth to today, with visits, labs, diagnoses and prescriptions, and writes them
+out in several formats. We ask for 20 living patients aged 45 to 75 in
+Massachusetts, with fixed seeds so the run is repeatable, and switch on the CSV
+exporter next to the default FHIR one:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span>-p<span class="w"> </span><span class="m">20</span><span class="w"> </span>-s<span class="w"> </span><span class="m">21</span><span class="w"> </span>-cs<span class="w"> </span><span class="m">21</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-a<span class="w"> </span><span class="m">45</span>-75<span class="w"> </span>--exporter.csv.export<span class="o">=</span><span class="nb">true</span><span class="w"> </span>Massachusetts<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">'^(Records|RNG)'</span>
+<span class="go">SLF4J: No SLF4J providers were found.</span>
+<span class="go">SLF4J: Defaulting to no-operation (NOP) logger implementation</span>
+<span class="go">SLF4J: See http://www.slf4j.org/codes.html#noProviders for further details.</span>
+<span class="go">Records: total=22, alive=20, dead=2</span>
+<span class="go">RNG=20</span>
+<span class="gp">$ </span>ls<span class="w"> </span>output<span class="w"> </span>output/csv
+<span class="go">output:</span>
+<span class="go">csv</span>
+<span class="go">fhir</span>
+<span class="go">metadata</span>
+
+<span class="go">output/csv:</span>
+<span class="go">allergies.csv</span>
+<span class="go">careplans.csv</span>
+<span class="go">claims.csv</span>
+<span class="go">claims_transactions.csv</span>
+<span class="go">conditions.csv</span>
+<span class="go">devices.csv</span>
+<span class="go">encounters.csv</span>
+<span class="go">imaging_studies.csv</span>
+<span class="go">immunizations.csv</span>
+<span class="go">medications.csv</span>
+<span class="go">observations.csv</span>
+<span class="go">organizations.csv</span>
+<span class="go">patients.csv</span>
+<span class="go">payers.csv</span>
+<span class="go">payer_transitions.csv</span>
+<span class="go">procedures.csv</span>
+<span class="go">providers.csv</span>
+<span class="go">supplies.csv</span>
+<span class="gp">$ </span>ls<span class="w"> </span>output/fhir<span class="w"> </span><span class="p">|</span><span class="w"> </span>wc<span class="w"> </span>-l
+<span class="go">24</span>
+<span class="gp">$ </span>jq<span class="w"> </span>--version
+<span class="go">jq-1.7</span>
+<span class="gp">$ </span>du<span class="w"> </span>-sh<span class="w"> </span>output/csv<span class="w"> </span>output/fhir
+<span class="go">22M	output/csv</span>
+<span class="go">106M	output/fhir</span>
+</code></pre></div></div>
+
+<p>The first surprise is already there: we asked for 20 patients and got 22
+records. <code class="language-plaintext highlighter-rouge">-p</code> counts living patients, and Synthea keeps the two who
+died during the simulation. A question about “our 20 patients” and a query
+over <code class="language-plaintext highlighter-rouge">patients.csv</code> already disagree by two, for an honest reason.
+Keep that in mind; the dead patients come back later.</p>
+
+<p>The CSV export is one file per kind of thing: patients, encounters,
+observations (labs, vitals, survey answers), conditions, medications and so
+on, all linked by UUIDs. The FHIR export is one Bundle per patient, plus two
+bundles for the hospitals and clinicians they saw. Same simulation, same
+patients, two shapes. The
+<a href="https://github.com/synthetichealth/synthea/wiki/CSV-File-Data-Dictionary">CSV
+data dictionary</a> lists every column.</p>
+
+<h2 id="the-same-result-twice">The same result, twice</h2>
+
+<p>Look at one HbA1c result (LOINC <code class="language-plaintext highlighter-rouge">4548-4</code>) in each format: the
+latest one for patient <code class="language-plaintext highlighter-rouge">86755eb9</code>, plus a smoking-status row for
+contrast. We cut the patient and encounter UUIDs out of the CSV so the lines
+fit. On the FHIR side we first pull every Observation out of the bundles into
+<code class="language-plaintext highlighter-rouge">obs.ndjson</code>, one resource per line, which makes later questions
+quick to grep and count:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>head<span class="w"> </span>-1<span class="w"> </span>output/csv/observations.csv<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d,<span class="w"> </span>-f1,4,5,7-9
+<span class="go">DATE,CATEGORY,CODE,VALUE,UNITS,TYPE</span>
+<span class="gp">$ </span>grep<span class="w"> </span>86755eb9<span class="w"> </span>output/csv/observations.csv<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>,4548-4,<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-1<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d,<span class="w"> </span>-f1,4,5,7-9
+<span class="gp">2026-09-26T05:47:23Z,laboratory,4548-4,8.2,%</span>,numeric
+<span class="gp">$ </span>grep<span class="w"> </span>-m1<span class="w"> </span>,72166-2,<span class="w"> </span>output/csv/observations.csv<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d,<span class="w"> </span>-f1,4,5,7-9
+<span class="go">2017-11-06T01:02:58Z,social-history,72166-2,Ex-smoker (finding),,text</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.entry[].resource | select(.resourceType == "Observation")'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>output/fhir/*.json<span class="w"> </span>&gt;<span class="w"> </span>obs.ndjson
+<span class="gp">$ </span>grep<span class="w"> </span>86755eb9<span class="w"> </span>obs.ndjson<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'select(.code.coding[0].code == "4548-4")'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-1<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'{effectiveDateTime, valueQuantity, code: .code.coding}'</span>
+<span class="go">{"effectiveDateTime":"2026-09-26T01:47:23-04:00","valueQuantity":{"value":8.21,"unit":"%","system":"http://unitsofmeasure.org","code":"%"},"code":[{"system":"http://loinc.org","code":"4548-4","display":"Hemoglobin A1c/Hemoglobin.total in Blood"}]}</span>
+</code></pre></div></div>
+
+<p>Already the shapes leak information differently. The CSV has a
+<code class="language-plaintext highlighter-rouge">CODE</code> column but no column saying which code system it belongs to;
+you have to know that observation codes are LOINC. It has one
+<code class="language-plaintext highlighter-rouge">VALUE</code> column for both numbers and words, with a <code class="language-plaintext highlighter-rouge">TYPE</code>
+column telling them apart, and it stores times in UTC (the <code class="language-plaintext highlighter-rouge">Z</code>). The
+FHIR resource names its code system as a URI, puts the number in a
+<code class="language-plaintext highlighter-rouge">valueQuantity</code> with a UCUM unit, writes the same moment with a
+local offset (<code class="language-plaintext highlighter-rouge">-04:00</code>), and keeps two decimals: <code class="language-plaintext highlighter-rouge">8.21</code>
+where the CSV says <code class="language-plaintext highlighter-rouge">8.2</code>. Every one of those differences shows up
+in a count later.</p>
+
+<h1 id="loading-postgresql">Loading PostgreSQL</h1>
+
+<p>We run PostgreSQL in a container and mount the CSV directory read-only. We
+don't publish port 5432: on the lab machine it belongs to another PostgreSQL,
+and we don't need it, because <code class="language-plaintext highlighter-rouge">docker exec</code> runs <code class="language-plaintext highlighter-rouge">psql</code>
+inside the container. The wait loop asks over TCP on purpose: during first-time
+setup the image runs a temporary server on the Unix socket only, and a script
+that connects too early gets cut off when it restarts.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>pg<span class="w"> </span>-e<span class="w"> </span><span class="nv">POSTGRES_PASSWORD</span><span class="o">=</span>lab<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-v<span class="w"> </span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/output/csv:/csv:ro"</span><span class="w"> </span>postgres:16-alpine
+<span class="go">0dda07cdf4c7e2b29713534fb6ffe835b6a04c15cd3f03136654531e54cca5d6</span>
+<span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="s1">'until pg_isready -h 127.0.0.1 -q; do sleep 1; done'</span>
+<span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>postgres<span class="w"> </span>--version
+<span class="go">postgres (PostgreSQL) 16.11</span>
+<span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-q<span class="w"> </span>-v<span class="w"> </span><span class="nv">ON_ERROR_STOP</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>&lt;<span class="w"> </span>load.sql
+<span class="go">NOTICE:  table "patients" does not exist, skipping</span>
+<span class="go">NOTICE:  table "encounters" does not exist, skipping</span>
+<span class="go">NOTICE:  table "observations" does not exist, skipping</span>
+<span class="go">NOTICE:  table "conditions" does not exist, skipping</span>
+<span class="go">NOTICE:  table "medications" does not exist, skipping</span>
+<span class="go">NOTICE:  table "immunizations" does not exist, skipping</span>
+<span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-c<span class="w"> </span><span class="s1">'\dt'</span>
+<span class="go">             List of relations</span>
+<span class="go"> Schema |     Name      | Type  |  Owner   </span>
+<span class="go">--------+---------------+-------+----------</span>
+<span class="go"> public | conditions    | table | postgres</span>
+<span class="go"> public | encounters    | table | postgres</span>
+<span class="go"> public | immunizations | table | postgres</span>
+<span class="go"> public | medications   | table | postgres</span>
+<span class="go"> public | observations  | table | postgres</span>
+<span class="go"> public | patients      | table | postgres</span>
+<span class="gp gp-VirtualEnv">(6 rows)</span>
+<span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'SELECT count(*), count(deathdate) AS dead FROM patients'</span>
+<span class="go"> count | dead </span>
+<span class="go">-------+------</span>
+<span class="go">    22 |    2</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+</code></pre></div></div>
+
+<p>The schema in <a href="static/files/week-2/load.sql">load.sql</a> creates
+six tables with the CSV column names and loads them with
+<code class="language-plaintext highlighter-rouge">\copy</code>. The interesting part is the observations table:</p>
+
+<div class="language-postgresql highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1">-- VALUE is text: one column holds numbers and coded answers.</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">observations</span><span class="w"> </span><span class="p">(</span>
+<span class="w">  </span><span class="nb">date</span><span class="w"> </span><span class="nb">timestamptz</span><span class="p">,</span><span class="w"> </span><span class="n">patient</span><span class="w"> </span><span class="nb">uuid</span><span class="p">,</span><span class="w"> </span><span class="n">encounter</span><span class="w"> </span><span class="nb">uuid</span><span class="p">,</span>
+<span class="w">  </span><span class="n">category</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span>
+<span class="w">  </span><span class="k">value</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span><span class="w"> </span><span class="n">units</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="nb">text</span><span class="p">);</span>
+
+<span class="c1">-- Cast once, at load time, and only the rows that are numbers.</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">observations</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">num</span><span class="w"> </span><span class="nb">numeric</span><span class="p">;</span>
+<span class="k">UPDATE</span><span class="w"> </span><span class="n">observations</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">value</span><span class="o">::</span><span class="nb">numeric</span>
+<span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'numeric'</span><span class="p">;</span>
+</code></pre></div></div>
+
+<p>Most columns get real types (<code class="language-plaintext highlighter-rouge">uuid</code>, <code class="language-plaintext highlighter-rouge">timestamptz</code>,
+<code class="language-plaintext highlighter-rouge">date</code>), so a malformed date fails the load instead of hiding in a
+text column. <code class="language-plaintext highlighter-rouge">VALUE</code> can't be numeric, because it also holds answers
+like “Never smoked tobacco”. So we keep it as text and add a <code class="language-plaintext highlighter-rouge">num</code>
+column, filled once at load time for the rows whose <code class="language-plaintext highlighter-rouge">TYPE</code> says
+numeric. Every query below uses <code class="language-plaintext highlighter-rouge">num</code>. The <code class="language-plaintext highlighter-rouge">NOTICE</code>
+lines are <code class="language-plaintext highlighter-rouge">DROP TABLE IF EXISTS</code> saying there was nothing to drop;
+they make the script safe to re-run.</p>
+
+<h2 id="messy-on-purpose">Messy on purpose</h2>
+
+<p>Why bother with <code class="language-plaintext highlighter-rouge">num</code>? Because the obvious queries are wrong in
+quiet ways. <code class="language-plaintext highlighter-rouge">psql -a</code> echoes each statement before its result:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>messy.sql
+<span class="go">-- One VALUE column holds numbers and words.</span>
+<span class="go">SELECT type, count(*) FROM observations GROUP BY type;</span>
+<span class="go">  type   | count </span>
+<span class="go">---------+-------</span>
+<span class="go"> text    |  6914</span>
+<span class="go"> numeric | 10951</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+
+<span class="go">SELECT value, count(*) FROM observations</span>
+<span class="go"> WHERE code = '72166-2' GROUP BY value;</span>
+<span class="go">             value              | count </span>
+<span class="go">--------------------------------+-------</span>
+<span class="go"> Ex-smoker (finding)            |   107</span>
+<span class="go"> Never smoked tobacco (finding) |   159</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+
+<span class="go">-- Compared as text, '99.1' &gt; '126' is true.</span>
+<span class="go">SELECT count(*) AS as_text FROM observations</span>
+<span class="go"> WHERE code = '2339-0' AND value &gt; '126';</span>
+<span class="go"> as_text </span>
+<span class="go">---------</span>
+<span class="go">     321</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">SELECT count(*) AS as_number FROM observations</span>
+<span class="go"> WHERE code = '2339-0' AND num &gt; 126;</span>
+<span class="go"> as_number </span>
+<span class="go">-----------</span>
+<span class="go">        12</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">-- Casting every row fails on the first word.</span>
+<span class="go">SELECT count(*) FROM observations</span>
+<span class="go"> WHERE value::numeric &gt; 126;</span>
+<span class="go">-- Encounters dated after the patient died</span>
+<span class="go">SELECT left(p.id::text, 8) AS patient, p.deathdate,</span>
+<span class="go">       e.start::date, e.encounterclass, e.description</span>
+<span class="go">  FROM patients p JOIN encounters e ON e.patient = p.id</span>
+<span class="go"> WHERE e.start::date &gt; p.deathdate;</span>
+<span class="go">ERROR:  invalid input syntax for type numeric: "Ex-smoker (finding)"</span>
+<span class="go"> patient  | deathdate  |   start    | encounterclass |     description     </span>
+<span class="go">----------+------------+------------+----------------+---------------------</span>
+<span class="go"> ee6bc21b | 2018-12-03 | 2018-12-07 | wellness       | Death Certification</span>
+<span class="go"> 0b5eb622 | 2026-08-16 | 2026-08-21 | wellness       | Death Certification</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+</code></pre></div></div>
+
+<p>Three lessons in one file. Compared as text, <code class="language-plaintext highlighter-rouge">'99.1' &gt; '126'</code>
+is true, because strings compare character by character, so the text query
+finds 321 “high” glucose results where the numeric one finds 12. Nothing
+warned us. Casting the whole column, on the other hand, fails loudly on the
+first word it meets, which is the better kind of failure. And two patients
+have a wellness encounter dated after their death: Synthea records a death
+certification as a visit. A query for “patients seen in the last year” would
+count one of them. Real EHR data has its own versions of this: placeholder
+dates, test patients, results filed against the wrong visit. Find them before
+you trust a count.</p>
+
+<h1 id="code-systems">Code systems</h1>
+
+<p>Clinical data is comparable across systems only because the important
+fields are coded. Each code system covers one kind of thing, and a code means
+nothing without its system: <code class="language-plaintext highlighter-rouge">4548-4</code> is HbA1c in LOINC and
+nothing in particular anywhere else. The ones you will meet first:</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>System</th><th>Codes</th><th>Example from our data</th><th>System URI in FHIR</th></tr></thead>
+<tbody>
+<tr><td>LOINC</td><td>lab tests, vital signs, survey questions, note types</td><td><code class="language-plaintext highlighter-rouge">4548-4</code> HbA1c</td><td><code class="language-plaintext highlighter-rouge">http://loinc.org</code></td></tr>
+<tr><td>SNOMED CT</td><td>diagnoses, findings, procedures</td><td><code class="language-plaintext highlighter-rouge">44054006</code> type 2 diabetes</td><td><code class="language-plaintext highlighter-rouge">http://snomed.info/sct</code></td></tr>
+<tr><td>RxNorm</td><td>drugs (US)</td><td><code class="language-plaintext highlighter-rouge">860975</code> metformin 500 mg ER</td><td><code class="language-plaintext highlighter-rouge">http://www.nlm.nih.gov/research/umls/rxnorm</code></td></tr>
+<tr><td>ICD-10</td><td>diagnoses on claims and in statistics (ICD-10-CM in the US)</td><td>none: Synthea codes conditions in SNOMED CT</td><td></td></tr>
+<tr><td>CVX</td><td>vaccines (US)</td><td>Immunization resources</td><td><code class="language-plaintext highlighter-rouge">http://hl7.org/fhir/sid/cvx</code></td></tr>
+<tr><td>UCUM</td><td>units of measure</td><td><code class="language-plaintext highlighter-rouge">%</code>, <code class="language-plaintext highlighter-rouge">mg/dL</code>, <code class="language-plaintext highlighter-rouge">mm[Hg]</code></td><td><code class="language-plaintext highlighter-rouge">http://unitsofmeasure.org</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The CSV export keeps a system name only where a table could hold more than
+one; for conditions it is always SNOMED CT. The FHIR export names a system on
+every coding. Here are the systems in one patient's bundle, most frequent
+first:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'SELECT system, count(*) FROM conditions GROUP BY 1'</span>
+<span class="go">  system   | count </span>
+<span class="go">-----------+-------</span>
+<span class="go"> SNOMED-CT |   943</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.. | objects | select(.system and .code) | .system'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>output/fhir/*86755eb9*.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-rn<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-12
+<span class="go">   2538 https://bluebutton.cms.gov/resources/codesystem/adjudication</span>
+<span class="go">   1415 http://loinc.org</span>
+<span class="go">   1316 http://snomed.info/sct</span>
+<span class="go">    537 http://terminology.hl7.org/CodeSystem/ex-serviceplace</span>
+<span class="go">    537 https://bluebutton.cms.gov/resources/variables/line_cms_type_srvc_cd</span>
+<span class="go">    413 http://unitsofmeasure.org</span>
+<span class="go">    400 http://terminology.hl7.org/CodeSystem/observation-category</span>
+<span class="go">    214 http://terminology.hl7.org/CodeSystem/claim-type</span>
+<span class="go">    195 http://terminology.hl7.org/CodeSystem/claiminformationcategory</span>
+<span class="go">    186 http://www.nlm.nih.gov/research/umls/rxnorm</span>
+<span class="go">    107 http://terminology.hl7.org/CodeSystem/processpriority</span>
+<span class="go">    107 http://terminology.hl7.org/CodeSystem/claimcareteamrole</span>
+</code></pre></div></div>
+
+<p>LOINC, SNOMED CT, UCUM and RxNorm are there, and so are code systems you
+didn't ask for: the claims and explanation-of-benefit resources carry CMS Blue
+Button codes, because Synthea models US insurance. The rule that follows from
+all this is the one to remember: <strong>match on system + code, never on
+display text</strong>. Display text is for people. It changes between
+releases, differs between vendors and is matched by substrings you didn't
+intend, as question 4 shows.</p>
+
+<p>Licences matter when you ship code that contains code lists.
+<a href="https://www.ama-assn.org/practice-management/cpt">CPT</a>, the US
+procedure codes used in billing, is licensed by the AMA.
+<a href="https://www.nlm.nih.gov/healthit/snomedct/index.html">SNOMED CT</a>
+is free to use in member countries but still licensed: in the US through the
+NLM, in Canada through Canada Health Infoway. LOINC is free under its own
+licence. RxNorm comes from the NLM.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> diagnoses in hospital data are coded in ICD-10-CA
+  and procedures in CCI, both maintained by
+  <a href="https://www.cihi.ca/en/submit-data-and-view-standards/codes-classifications-and-terminologies">CIHI</a>,
+  not the US ICD-10-CM. Drugs are identified by the Health Canada DIN, and the
+  Canadian Clinical Drug Data Set (CCDD) plays the role RxNorm plays in the US.
+  LOINC, SNOMED CT and UCUM are shared.</p>
+</blockquote>
+
+<h1 id="five-questions-two-ways">Five questions, two ways</h1>
+
+<p>Now the real work. We write five clinical questions, answer each in SQL,
+then answer it again with jq over the FHIR export. jq is the right second
+tool: it reads the same JSON a FHIR server returns, so the habits carry over
+to API work in week 4. Three jq moves cover most of it: filter by
+<code class="language-plaintext highlighter-rouge">resourceType</code>, follow <code class="language-plaintext highlighter-rouge">subject.reference</code> back to the
+patient, and read <code class="language-plaintext highlighter-rouge">code.coding</code> to match system + code.
+<code class="language-plaintext highlighter-rouge">jq -n</code> with <code class="language-plaintext highlighter-rouge">inputs</code> streams every file on the command
+line through one program, so <code class="language-plaintext highlighter-rouge">output/fhir/*.json</code> is the whole
+population.</p>
+
+<p>Before writing either query, pin the question down. Who is counted
+(patients, visits, results)? Over what window, in which time zone? Which codes,
+in which unit? We pin “the last year” to a literal date,
+<code class="language-plaintext highlighter-rouge">2025-10-31</code>, so neither tool has its own idea of “now”.</p>
+
+<p>Each question is a pair of files you can download and run:
+<a href="static/files/week-2/q1-hba1c.sql">q1-hba1c.sql</a> and
+<a href="static/files/week-2/q1-hba1c.jq">q1-hba1c.jq</a>,
+<a href="static/files/week-2/q2-ed.sql">q2-ed.sql</a> and
+<a href="static/files/week-2/q2-ed.jq">q2-ed.jq</a>,
+<a href="static/files/week-2/q3-bp.sql">q3-bp.sql</a> and
+<a href="static/files/week-2/q3-bp.jq">q3-bp.jq</a>,
+<a href="static/files/week-2/q4-metformin.sql">q4-metformin.sql</a> and
+<a href="static/files/week-2/q4-metformin.jq">q4-metformin.jq</a>,
+<a href="static/files/week-2/q5-glucose.sql">q5-glucose.sql</a> and
+<a href="static/files/week-2/q5-glucose.jq">q5-glucose.jq</a>. The rest of
+the page uses <a href="static/files/week-2/messy.sql">messy.sql</a>,
+<a href="static/files/week-2/count.sql">count.sql</a>,
+<a href="static/files/week-2/count-obs.jq">count-obs.jq</a> and
+<a href="static/files/week-2/to-tx.jq">to-tx.jq</a>.</p>
+
+<h2 id="q1-hba1c-above-9">Q1: HbA1c above 9% in the last year</h2>
+
+<p>HbA1c reflects average blood glucose over the previous few months, and a
+high value is the classic sign of poorly controlled diabetes. The question
+names a code (LOINC <code class="language-plaintext highlighter-rouge">4548-4</code>), a threshold, a unit (%) and a window,
+and asks for patients:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>q1-hba1c.sql
+<span class="go">-- Q1: HbA1c (LOINC 4548-4) above 9% in the last year</span>
+<span class="go">SELECT count(*) AS results, count(DISTINCT patient) AS patients</span>
+<span class="go">  FROM observations</span>
+<span class="go"> WHERE code = '4548-4' AND num &gt; 9 AND date &gt;= '2025-10-31';</span>
+<span class="go"> results | patients </span>
+<span class="go">---------+----------</span>
+<span class="go">       0 |        0</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">-- The same question with no time window</span>
+<span class="go">SELECT date::date, left(patient::text, 8) AS patient, value</span>
+<span class="go">  FROM observations</span>
+<span class="go"> WHERE code = '4548-4' AND num &gt; 9;</span>
+<span class="go">    date    | patient  | value </span>
+<span class="go">------------+----------+-------</span>
+<span class="go"> 2018-08-11 | 86755eb9 | 9.7</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">-- Every type 2 diabetic (SNOMED CT 44054006): latest HbA1c</span>
+<span class="go">WITH dm AS (</span>
+<span class="go">  SELECT DISTINCT patient FROM conditions</span>
+<span class="go">   WHERE code = '44054006'),</span>
+<span class="go">ranked AS (</span>
+<span class="go">  SELECT patient, date, value, row_number() OVER (</span>
+<span class="go">           PARTITION BY patient ORDER BY date DESC) AS n</span>
+<span class="go">    FROM observations WHERE code = '4548-4')</span>
+<span class="go">SELECT left(dm.patient::text, 8) AS patient,</span>
+<span class="go">       r.date::date AS latest, r.value</span>
+<span class="go">  FROM dm LEFT JOIN ranked r</span>
+<span class="go">    ON r.patient = dm.patient AND r.n = 1</span>
+<span class="go"> ORDER BY latest;</span>
+<span class="go"> patient  |   latest   | value </span>
+<span class="go">----------+------------+-------</span>
+<span class="go"> 058228a1 | 2025-12-09 | 6.1</span>
+<span class="go"> ee37362c | 2025-12-14 | 6.0</span>
+<span class="go"> c4f2f15f | 2026-08-16 | 6.1</span>
+<span class="go"> bb61488c | 2026-08-19 | 6.1</span>
+<span class="go"> 86755eb9 | 2026-09-26 | 8.2</span>
+<span class="gp gp-VirtualEnv">(5 rows)</span>
+<span class="gp">$ </span>cat<span class="w"> </span>q1-hba1c.jq
+<span class="gp"># </span>Q1<span class="w"> </span>over<span class="w"> </span>the<span class="w"> </span>FHIR<span class="w"> </span>export:<span class="w"> </span>HbA1c<span class="w"> </span>above<span class="w"> </span><span class="m">9</span>%
+<span class="go">[inputs | .entry[].resource</span>
+<span class="go"> | select(.resourceType == "Observation")</span>
+<span class="go"> | select(any(.code.coding[];</span>
+<span class="go">     .system == "http://loinc.org" and .code == "4548-4"))</span>
+<span class="go"> | select(.valueQuantity.value &gt; 9)]</span>
+<span class="go">| {ever: length,</span>
+<span class="go">   patients: (map(.subject.reference) | unique | length),</span>
+<span class="go">   last_year: (map(select(.effectiveDateTime &gt;= "2025-10-31"))</span>
+<span class="go">               | length),</span>
+<span class="go">   values: map([.effectiveDateTime, .valueQuantity.value])}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-c<span class="w"> </span>-f<span class="w"> </span>q1-hba1c.jq<span class="w"> </span>output/fhir/*.json
+<span class="go">{"ever":1,"patients":1,"last_year":0,"values":[["2018-08-11T01:47:23-04:00",9.71]]}</span>
+</code></pre></div></div>
+
+<p>Both tools say zero in the last year, and one result ever: a 9.7% in August
+2018. A zero is the answer that most needs checking, because a typo in the code
+also returns zero. The second SQL statement drops the window to prove the
+filter can match at all, and the third turns the question around: start from
+the people who should have been tested, the five patients with type 2
+diabetes, and show each one's latest result. A <code class="language-plaintext highlighter-rouge">LEFT JOIN</code> keeps
+anyone with no HbA1c at all (a care gap); here all five have a result within
+the last year. <code class="language-plaintext highlighter-rouge">row_number() OVER (PARTITION BY patient ORDER BY date
+DESC)</code> is the standard way to pick the latest row per patient, and you
+will write it often.</p>
+
+<p>Look again at the jq output: <code class="language-plaintext highlighter-rouge">9.71</code>, where SQL said
+<code class="language-plaintext highlighter-rouge">9.7</code>. The CSV rounds values to one decimal; FHIR keeps two. At a
+threshold of 9 it doesn't matter. Move the threshold onto the rounding and it
+does:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-Atc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"SELECT count(*) FROM observations WHERE code = '4548-4' AND num &gt; 8.2"</span>
+<span class="go">1</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'select(.code.coding[0].code == "4548-4")'</span><span class="w"> </span>obs.ndjson<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-s<span class="w"> </span><span class="s1">'map(select(.valueQuantity.value &gt; 8.2)) | length'</span>
+<span class="go">13</span>
+</code></pre></div></div>
+
+<p>One result above 8.2 in SQL, thirteen in jq. Twelve results of
+<code class="language-plaintext highlighter-rouge">8.21</code> were written to the CSV as <code class="language-plaintext highlighter-rouge">8.2</code>, which is not
+above 8.2. The FHIR server we load later agrees with jq. Neither tool is wrong;
+they were given different numbers. When you compare exports, compare at the
+precision of the coarser one, and say so.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> let it draft queries; check each against a
+  sample you counted by hand.</p>
+</blockquote>
+
+<h2 id="q2-ed-visits-per-month">Q2: ED visits per month</h2>
+
+<p>An emergency department visit is an encounter, so this question counts
+visits, not patients; we show both. The opposite mistake, counting encounters
+when the question asked about patients, is one of the commonest in this work,
+so put both numbers side by side until you are sure which one was asked for.
+The CSV calls the encounter class
+<code class="language-plaintext highlighter-rouge">emergency</code>. FHIR uses the HL7
+<a href="https://terminology.hl7.org/CodeSystem-v3-ActCode.html">ActCode</a>
+<code class="language-plaintext highlighter-rouge">EMER</code>. Same idea, different code, and a mapping you must get
+right:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>q2-ed.sql
+<span class="go">-- Q2: ED visits per month since January 2024</span>
+<span class="go">SELECT to_char(start, 'YYYY-MM') AS month,</span>
+<span class="go">       count(*) AS visits, count(DISTINCT patient) AS patients</span>
+<span class="go">  FROM encounters</span>
+<span class="go"> WHERE encounterclass = 'emergency' AND start &gt;= '2024-01-01'</span>
+<span class="go"> GROUP BY 1 ORDER BY 1;</span>
+<span class="go">  month  | visits | patients </span>
+<span class="go">---------+--------+----------</span>
+<span class="go"> 2024-02 |      1 |        1</span>
+<span class="go"> 2024-08 |      1 |        1</span>
+<span class="go"> 2024-10 |      2 |        2</span>
+<span class="go"> 2024-12 |      2 |        2</span>
+<span class="go"> 2025-02 |      1 |        1</span>
+<span class="go"> 2025-08 |      2 |        2</span>
+<span class="go"> 2026-06 |      1 |        1</span>
+<span class="go"> 2026-10 |      1 |        1</span>
+<span class="gp gp-VirtualEnv">(8 rows)</span>
+
+<span class="go">-- October 2024 by day: UTC, then Boston time</span>
+<span class="go">SELECT start::date AS utc_day,</span>
+<span class="go">       (start AT TIME ZONE 'America/New_York')::date AS local_day</span>
+<span class="go">  FROM encounters</span>
+<span class="go"> WHERE encounterclass = 'emergency'</span>
+<span class="go">   AND start BETWEEN '2024-10-01' AND '2024-11-01';</span>
+<span class="go">  utc_day   | local_day  </span>
+<span class="go">------------+------------</span>
+<span class="go"> 2024-10-05 | 2024-10-05</span>
+<span class="go"> 2024-10-05 | 2024-10-04</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+<span class="gp">$ </span>cat<span class="w"> </span>q2-ed.jq
+<span class="gp"># </span>Q2<span class="w"> </span>over<span class="w"> </span>the<span class="w"> </span>FHIR<span class="w"> </span>export:<span class="w"> </span>ED<span class="w"> </span>visits<span class="w"> </span>per<span class="w"> </span>month
+<span class="go">[inputs | .entry[].resource</span>
+<span class="go"> | select(.resourceType == "Encounter" and .class.code == "EMER")</span>
+<span class="go"> | select(.period.start &gt;= "2024-01-01")</span>
+<span class="go"> | {month: .period.start[:7], day: .period.start[:10],</span>
+<span class="go">    patient: .subject.reference}]</span>
+<span class="go">| group_by(.month)[]</span>
+<span class="go">| [.[0].month, length, (map(.patient) | unique | length),</span>
+<span class="go">   (map(.day) | join(" "))]</span>
+<span class="go">| @tsv</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-r<span class="w"> </span>-f<span class="w"> </span>q2-ed.jq<span class="w"> </span>output/fhir/*.json
+<span class="go">2024-02	1	1	2024-02-09</span>
+<span class="go">2024-08	1	1	2024-08-14</span>
+<span class="go">2024-10	2	2	2024-10-04 2024-10-05</span>
+<span class="go">2024-12	2	2	2024-12-29 2024-12-25</span>
+<span class="go">2025-02	1	1	2025-02-11</span>
+<span class="go">2025-08	2	2	2025-08-19 2025-08-08</span>
+<span class="go">2026-06	1	1	2026-06-12</span>
+<span class="go">2026-10	1	1	2026-10-25</span>
+</code></pre></div></div>
+
+<p>The months agree. The days don't. In October 2024 SQL puts both visits on
+the 5th, and jq puts one on the 4th. The CSV stores UTC; the FHIR export writes
+Boston time with its offset, and our jq takes the first ten characters of that
+local string. A visit late in the evening of 4 October in Boston is already
+5 October in UTC. The second SQL statement converts to
+<code class="language-plaintext highlighter-rouge">America/New_York</code> and
+gets jq's answer. Hospitals report by local day, so local time is usually
+right for a census; whichever you choose, choose it on purpose. A monthly
+report can show the same problem when a visit falls near midnight at the end
+of a month.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> in this Synthea build, the CSV timestamps we
+  looked at end in <code class="language-plaintext highlighter-rouge">Z</code> (UTC), and the FHIR export writes the same moments with a
+  <code class="language-plaintext highlighter-rouge">-04:00</code> or <code class="language-plaintext highlighter-rouge">-05:00</code> offset, depending on daylight
+  saving time. Comparing those strings compares local dates, not
+  instants.</p>
+</blockquote>
+
+<h2 id="q3-systolic-blood-pressure">Q3: systolic blood pressure of 140 or more</h2>
+
+<p>Systolic pressure has its own LOINC code, <code class="language-plaintext highlighter-rouge">8480-6</code>. SQL finds
+it at once. The obvious jq query finds nothing:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>q3-bp.sql
+<span class="go">-- Q3: systolic BP (LOINC 8480-6) of 140 mm[Hg] or more</span>
+<span class="go">SELECT date::date, left(patient::text, 8) AS patient,</span>
+<span class="go">       num, units</span>
+<span class="go">  FROM observations</span>
+<span class="go"> WHERE code = '8480-6' AND num &gt;= 140 AND date &gt;= '2025-10-31'</span>
+<span class="go"> ORDER BY 1;</span>
+<span class="go">    date    | patient  |  num  | units  </span>
+<span class="go">------------+----------+-------+--------</span>
+<span class="go"> 2025-12-14 | ee37362c | 142.0 | mm[Hg]</span>
+<span class="go"> 2026-08-16 | c4f2f15f | 145.0 | mm[Hg]</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'select(.code.coding[0].code == "8480-6")'</span><span class="w"> </span>obs.ndjson<span class="w"> </span><span class="p">|</span><span class="w"> </span>wc<span class="w"> </span>-l
+<span class="go">0</span>
+<span class="gp">$ </span>cat<span class="w"> </span>q3-bp.jq
+<span class="gp"># </span>Q3<span class="w"> </span>over<span class="w"> </span>the<span class="w"> </span>FHIR<span class="w"> </span>export.<span class="w"> </span>Systolic<span class="w"> </span>BP<span class="w"> </span>usually<span class="w"> </span>lives<span class="w"> </span>inside<span class="w"> </span>a
+<span class="gp"># </span>blood<span class="w"> </span>pressure<span class="w"> </span>panel<span class="w"> </span><span class="o">(</span>LOINC<span class="w"> </span><span class="m">85354</span>-9<span class="o">)</span><span class="w"> </span>as<span class="w"> </span>a<span class="w"> </span>component.
+<span class="go">inputs | .entry[].resource</span>
+<span class="go">| select(.resourceType == "Observation"</span>
+<span class="go">         and .effectiveDateTime &gt;= "2025-10-31") as $obs</span>
+<span class="go">| (.component // [.])[]</span>
+<span class="go">| select(any(.code.coding[];</span>
+<span class="go">    .system == "http://loinc.org" and .code == "8480-6"))</span>
+<span class="go">| select(.valueQuantity.value &gt;= 140)</span>
+<span class="go">| [$obs.effectiveDateTime[:10], $obs.subject.reference[9:17],</span>
+<span class="gp">   $</span>obs.code.coding<span class="o">[</span><span class="m">0</span><span class="o">]</span>.code,<span class="w"> </span>.valueQuantity.value,
+<span class="go">   .valueQuantity.unit]</span>
+<span class="go">| @tsv</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-r<span class="w"> </span>-f<span class="w"> </span>q3-bp.jq<span class="w"> </span>output/fhir/*.json
+<span class="go">2025-12-14	ee37362c	85354-9	142	mm[Hg]</span>
+<span class="go">2026-08-15	c4f2f15f	85354-9	145	mm[Hg]</span>
+</code></pre></div></div>
+
+<p>Zero isn't a data problem; it's a modelling difference. In FHIR, a blood
+pressure is one Observation coded as a panel (<code class="language-plaintext highlighter-rouge">85354-9</code>) with the
+systolic and diastolic values as <code class="language-plaintext highlighter-rouge">component</code>s, as the
+<a href="https://hl7.org/fhir/R4/observation.html">Observation</a> page
+describes. The CSV flattens each component into its own row. The fixed jq
+looks inside components (and falls back to the resource itself when there are
+none), and finds the same two readings. Note the second date once more:
+<code class="language-plaintext highlighter-rouge">2026-08-16</code> in SQL, <code class="language-plaintext highlighter-rouge">2026-08-15</code> in jq. Same reading,
+same time-zone story as Q2.</p>
+
+<h2 id="q4-diabetes-and-metformin">Q4: type 2 diabetes and metformin</h2>
+
+<p>How many patients with type 2 diabetes are on metformin today? The first
+SQL statement shows why the codes matter, by doing it wrong:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>q4-metformin.sql
+<span class="go">-- Q4: patients with type 2 diabetes on metformin today.</span>
+<span class="go">-- Matching on display text catches prediabetes too:</span>
+<span class="go">SELECT code, description, count(DISTINCT patient)</span>
+<span class="go">  FROM conditions WHERE description ILIKE '%diabetes%'</span>
+<span class="go"> GROUP BY 1, 2 ORDER BY 3 DESC;</span>
+<span class="go">      code       |                              description                               | count </span>
+<span class="go">-----------------+------------------------------------------------------------------------+-------</span>
+<span class="go"> 714628002       | Prediabetes (finding)                                                  |    15</span>
+<span class="go"> 44054006        | Diabetes mellitus type 2 (disorder)                                    |     5</span>
+<span class="go"> 368581000119106 | Neuropathy due to type 2 diabetes mellitus (disorder)                  |     2</span>
+<span class="go"> 127013003       | Disorder of kidney due to diabetes mellitus (disorder)                 |     2</span>
+<span class="go"> 157141000119108 | Proteinuria due to type 2 diabetes mellitus (disorder)                 |     1</span>
+<span class="go"> 1551000119108   | Nonproliferative diabetic retinopathy due to type II diabetes mellitus |     1</span>
+<span class="go"> 90781000119102  | Microalbuminuria due to type 2 diabetes mellitus (disorder)            |     1</span>
+<span class="gp gp-VirtualEnv">(7 rows)</span>
+
+<span class="go">SELECT count(DISTINCT patient) AS by_text FROM conditions</span>
+<span class="go"> WHERE description ILIKE '%diabetes%';</span>
+<span class="go"> by_text </span>
+<span class="go">---------</span>
+<span class="go">      17</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">-- Matching on the code (SNOMED CT 44054006), then joining</span>
+<span class="go">-- metformin (RxNorm 860975) with no STOP date</span>
+<span class="go">SELECT count(DISTINCT c.patient) AS diabetics,</span>
+<span class="go">       count(DISTINCT m.patient) AS on_metformin,</span>
+<span class="go">       count(m.patient) AS rows_joined</span>
+<span class="go">  FROM conditions c</span>
+<span class="go">  LEFT JOIN medications m</span>
+<span class="go">    ON m.patient = c.patient AND m.code = '860975'</span>
+<span class="go">   AND m.stop IS NULL</span>
+<span class="go"> WHERE c.code = '44054006' AND c.stop IS NULL;</span>
+<span class="go"> diabetics | on_metformin | rows_joined </span>
+<span class="go">-----------+--------------+-------------</span>
+<span class="go">         5 |            5 |           5</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">-- Rows are prescriptions, not patients</span>
+<span class="go">SELECT count(*) AS prescriptions, count(DISTINCT patient)</span>
+<span class="go">  FROM medications WHERE code = '860975';</span>
+<span class="go"> prescriptions | count </span>
+<span class="go">---------------+-------</span>
+<span class="go">            54 |     5</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+<span class="gp">$ </span>cat<span class="w"> </span>q4-metformin.jq
+<span class="gp"># </span>Q4<span class="w"> </span>over<span class="w"> </span>the<span class="w"> </span>FHIR<span class="w"> </span><span class="nb">export</span>
+<span class="go">def coded($sys; $code):</span>
+<span class="go">  any(.coding[]?; .system == $sys and .code == $code);</span>
+<span class="go">[inputs | .entry[].resource] as $all</span>
+<span class="go">| ($all | map(select(.resourceType == "Condition"</span>
+<span class="go">    and (.code | coded("http://snomed.info/sct"; "44054006"))</span>
+<span class="go">    and .clinicalStatus.coding[0].code == "active")</span>
+<span class="go">    | .subject.reference) | unique) as $dm</span>
+<span class="go">| ($all | map(select(.resourceType == "MedicationRequest"</span>
+<span class="go">    and (.medicationCodeableConcept | coded(</span>
+<span class="go">      "http://www.nlm.nih.gov/research/umls/rxnorm"; "860975"))</span>
+<span class="go">    and .status == "active")</span>
+<span class="go">    | .subject.reference) | unique) as $met</span>
+<span class="go">| {diabetics: ($dm | length),</span>
+<span class="go">   on_metformin: ($met | map(select(IN($dm[]))) | length)}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-c<span class="w"> </span>-f<span class="w"> </span>q4-metformin.jq<span class="w"> </span>output/fhir/*.json
+<span class="go">{"diabetics":5,"on_metformin":5}</span>
+</code></pre></div></div>
+
+<p>Searching display text for “diabetes” finds 17 patients, because 15
+patients have <em>prediabetes</em>, and complications like diabetic kidney
+disease are separate codes. Matching SNOMED CT <code class="language-plaintext highlighter-rouge">44054006</code> finds 5.
+If you do want “any diabetes”, build the list of codes on purpose (a value
+set), don't let a substring build it for you. The join then needs both a
+code and a state: RxNorm <code class="language-plaintext highlighter-rouge">860975</code> (24-hour metformin 500 mg) with
+no stop date. The last statement is the classic trap: 54 metformin rows but
+only 5 patients, because each refill is a new prescription row. Count
+<code class="language-plaintext highlighter-rouge">DISTINCT patient</code> when the question is about people.</p>
+
+<p>In jq, “today” has to come from different fields: a Condition's
+<code class="language-plaintext highlighter-rouge">clinicalStatus</code> and a MedicationRequest's <code class="language-plaintext highlighter-rouge">status</code>.
+<code class="language-plaintext highlighter-rouge">coded</code> is a small helper that matches system + code on any coding,
+and <code class="language-plaintext highlighter-rouge">IN</code> intersects the two patient lists. Both tools say 5 and 5.
+They agree here because Synthea derives the CSV stop date and the FHIR status
+from the same event. In a real EHR the two are separate fields with separate
+errors, and an active order for a patient who died is a common finding.</p>
+
+<h2 id="q5-glucose-and-units">Q5: glucose and units</h2>
+
+<p>The watch-out from the summary: comparing values without converting units.
+Canadian labs report glucose in mmol/L; Synthea's US-style data is in mg/dL.
+Suppose a Canadian colleague asks for glucose results of 7.0 mmol/L or more in
+the last year. Glucose also has two common LOINC codes, for whole blood and for
+serum or plasma, so we ask for both:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>q5-glucose.sql
+<span class="go">-- Q5: glucose of 7.0 mmol/L or more in the last year.</span>
+<span class="go">-- Two LOINC codes; values are mg/dL; 1 mmol/L = 18.016 mg/dL</span>
+<span class="go">SELECT code, units, count(*) AS results,</span>
+<span class="go">       count(*) FILTER (WHERE num &gt;= 7.0) AS unconverted,</span>
+<span class="go">       count(*) FILTER (WHERE num / 18.016 &gt;= 7.0) AS converted</span>
+<span class="go">  FROM observations</span>
+<span class="go"> WHERE code IN ('2339-0', '2345-7') AND date &gt;= '2025-10-31'</span>
+<span class="go"> GROUP BY 1, 2;</span>
+<span class="go">  code  | units | results | unconverted | converted </span>
+<span class="go">--------+-------+---------+-------------+-----------</span>
+<span class="go"> 2339-0 | mg/dL |      20 |          20 |         1</span>
+<span class="go"> 2345-7 | mg/dL |       1 |           1 |         0</span>
+<span class="gp gp-VirtualEnv">(2 rows)</span>
+
+<span class="go">SELECT date::date, left(patient::text, 8) AS patient, num,</span>
+<span class="go">       round(num / 18.016, 1) AS mmol_l</span>
+<span class="go">  FROM observations</span>
+<span class="go"> WHERE code IN ('2339-0', '2345-7') AND date &gt;= '2025-10-31'</span>
+<span class="go">   AND num / 18.016 &gt;= 7.0;</span>
+<span class="go">    date    | patient  |  num  | mmol_l </span>
+<span class="go">------------+----------+-------+--------</span>
+<span class="go"> 2026-09-26 | 86755eb9 | 140.2 |    7.8</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+<span class="gp">$ </span>cat<span class="w"> </span>q5-glucose.jq
+<span class="gp"># </span>Q5<span class="w"> </span>over<span class="w"> </span>the<span class="w"> </span>FHIR<span class="w"> </span>export:<span class="w"> </span>convert<span class="w"> </span>to<span class="w"> </span>mmol/L<span class="w"> </span>before<span class="w"> </span>comparing
+<span class="go">inputs | .entry[].resource</span>
+<span class="go">| select(.resourceType == "Observation"</span>
+<span class="go">         and .effectiveDateTime &gt;= "2025-10-31")</span>
+<span class="go">| select(any(.code.coding[]; .system == "http://loinc.org"</span>
+<span class="go">    and (.code == "2339-0" or .code == "2345-7")))</span>
+<span class="go">| .valueQuantity as $q</span>
+<span class="go">| (if $q.code == "mg/dL" then $q.value / 18.016</span>
+<span class="go">   elif $q.code == "mmol/L" then $q.value</span>
+<span class="go">   else error("unexpected unit \($q.code)") end) as $mmol</span>
+<span class="go">| select($mmol &gt;= 7.0)</span>
+<span class="go">| [.effectiveDateTime[:10], .subject.reference[9:17],</span>
+<span class="gp">   $</span>q.value,<span class="w"> </span><span class="o">(</span><span class="nv">$mmol</span><span class="w"> </span>*<span class="w"> </span><span class="m">10</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>round<span class="w"> </span>/<span class="w"> </span><span class="m">10</span><span class="o">)]</span>
+<span class="go">| @tsv</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-r<span class="w"> </span>-f<span class="w"> </span>q5-glucose.jq<span class="w"> </span>output/fhir/*.json
+<span class="go">2026-09-26	86755eb9	140.2	7.8</span>
+</code></pre></div></div>
+
+<p>Applied straight to mg/dL values, the 7.0 threshold flags all 21 results.
+Converted (one mmol/L of glucose is 18.016 mg/dL, from its molar mass of
+180.16 g/mol), it flags one. The jq version checks the UCUM unit code on every
+value and stops with an error on a unit it doesn't know, rather than guessing.
+That is the behaviour you want: in real feeds, one lab's mmol/L and another's
+mg/dL arrive under the same LOINC code.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> SI units are the norm in Canadian lab reports,
+  so mmol/L for glucose. If you build a report from US data or from a US
+  vendor's defaults, convert first and print the unit next to every number.
+  Your unit tests should include a value in each unit.</p>
+</blockquote>
+
+<h1 id="explaining-every-difference">Explaining every difference</h1>
+
+<p>Before trusting any per-question count, reconcile the totals. SQL has
+17,865 observation rows; the FHIR export has fewer Observation resources:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-i<span class="w"> </span>pg<span class="w"> </span>psql<span class="w"> </span>-U<span class="w"> </span>postgres<span class="w"> </span>-a<span class="w"> </span>&lt;<span class="w"> </span>count.sql
+<span class="go">-- Observation rows, and the ones with no category</span>
+<span class="go">SELECT count(*),</span>
+<span class="go">       count(*) FILTER (WHERE category IS NULL) AS no_category</span>
+<span class="go">  FROM observations;</span>
+<span class="go"> count | no_category </span>
+<span class="go">-------+-------------</span>
+<span class="go"> 17865 |         693</span>
+<span class="gp gp-VirtualEnv">(1 row)</span>
+
+<span class="go">SELECT code, description, count(*) FROM observations</span>
+<span class="go"> WHERE category IS NULL GROUP BY 1, 2;</span>
+<span class="go"> code | description | count </span>
+<span class="go">------+-------------+-------</span>
+<span class="go"> DALY | DALY        |   231</span>
+<span class="go"> QALY | QALY        |   231</span>
+<span class="go"> QOLS | QOLS        |   231</span>
+<span class="gp gp-VirtualEnv">(3 rows)</span>
+<span class="gp">$ </span>wc<span class="w"> </span>-l<span class="w"> </span>&lt;<span class="w"> </span>obs.ndjson
+<span class="go">11572</span>
+<span class="gp">$ </span>cat<span class="w"> </span>count-obs.jq
+<span class="gp"># </span>Run<span class="w"> </span>with<span class="w"> </span>jq<span class="w"> </span>-s<span class="w"> </span>over<span class="w"> </span>one<span class="w"> </span>Observation<span class="w"> </span>per<span class="w"> </span>line.
+<span class="gp"># </span>Why<span class="w"> </span>FHIR<span class="w"> </span>has<span class="w"> </span>fewer<span class="w"> </span>Observations<span class="w"> </span>than<span class="w"> </span>observations.csv
+<span class="go">{resources: length,</span>
+<span class="go"> with_components: map(select(.component)) | length,</span>
+<span class="go"> rows_if_flattened:</span>
+<span class="go">   map(if .component then (.component | length) else 1 end)</span>
+<span class="go">   | add,</span>
+<span class="go"> panels: map(select(.component) | .code.coding[0].code)</span>
+<span class="go">   | group_by(.) | map({(.[0]): length}) | add}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-s<span class="w"> </span>-c<span class="w"> </span>-f<span class="w"> </span>count-obs.jq<span class="w"> </span>obs.ndjson
+<span class="go">{"resources":11572,"with_components":546,"rows_if_flattened":17172,"panels":{"85354-9":274,"93025-5":266,"X9999-0":6}}</span>
+</code></pre></div></div>
+
+<p>Every row is accounted for. 546 FHIR Observations have components: 274
+blood pressure panels (<code class="language-plaintext highlighter-rouge">85354-9</code>), 266 PRAPARE social-needs
+questionnaires (<code class="language-plaintext highlighter-rouge">93025-5</code>) and 6 of Synthea's own operative-status
+panels (<code class="language-plaintext highlighter-rouge">X9999-0</code>, a placeholder code). Flattened, they and the
+plain Observations make 17,172 rows. The other
+693 CSV rows (DALY, QALY and QOLS: Synthea's quality-of-life measures) have no
+category and no FHIR Observation at all. 17,172 + 693 = 17,865. That is the
+kind of write-up “explain every count that differs” asks for. Here is the full
+list from this lecture:</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>What</th><th>SQL / CSV</th><th>jq / FHIR</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Patients</td><td>22 rows for <code class="language-plaintext highlighter-rouge">-p 20</code></td><td>22 bundles</td><td><code class="language-plaintext highlighter-rouge">-p</code> counts living patients; 2 died and are kept</td></tr>
+<tr><td>Observations</td><td>17,865 rows</td><td>11,572 resources</td><td>components flattened to rows; DALY/QALY/QOLS only in CSV</td></tr>
+<tr><td>Glucose above 126 mg/dL</td><td>321 as text, 12 as numbers</td><td></td><td>text comparison is character by character</td></tr>
+<tr><td>Q1 HbA1c, highest value</td><td>9.7</td><td>9.71</td><td>CSV rounds to one decimal</td></tr>
+<tr><td>Q1 probe: HbA1c above 8.2</td><td>1</td><td>13 (HAPI: 13)</td><td>twelve 8.21s became 8.2</td></tr>
+<tr><td>Q2 ED visits, October 2024 by day</td><td>5th, 5th</td><td>4th, 5th</td><td>UTC versus Boston time</td></tr>
+<tr><td>Q3 systolic 140 or more</td><td>2</td><td>0 naive, 2 with components</td><td>FHIR keeps systolic inside the BP panel</td></tr>
+<tr><td>Q3 date of one reading</td><td>2026-08-16</td><td>2026-08-15</td><td>UTC versus Boston time</td></tr>
+<tr><td>Q4 diabetes</td><td>17 by display text, 5 by code</td><td>5 by code</td><td>display text matches prediabetes and complications</td></tr>
+<tr><td>Q4 metformin</td><td>54 rows, 5 patients</td><td>5 patients</td><td>rows are prescriptions, not people</td></tr>
+<tr><td>Q5 glucose 7.0 mmol/L or more</td><td>21 unconverted, 1 converted</td><td>1</td><td>values are mg/dL; 1 mmol/L = 18.016 mg/dL</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Most of these fall into a handful of families: what is counted (patients,
+encounters, rows), when (window, time zone), how values are stored (type,
+precision, unit), and how the two formats model the same fact (flattened rows
+versus components, CSV-only measures). Missing data is the last family: a
+query that starts from results can't see the patient who has none, which is
+why Q1 started from the diabetics.</p>
+
+<h1 id="notes-and-documents">Notes and documents</h1>
+
+<p>Coded data is what a system can query; notes are where clinicians write
+what happened. Synthea's notes are DocumentReference resources, one per
+encounter, with the text base64-encoded in <code class="language-plaintext highlighter-rouge">content.attachment.data</code>.
+Here is the latest one for the patient with the 9.7% HbA1c:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.entry[].resource | select(.resourceType == "DocumentReference")'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>output/fhir/*86755eb9*.json<span class="w"> </span>&gt;<span class="w"> </span>notes.ndjson
+<span class="gp">$ </span>wc<span class="w"> </span>-l<span class="w"> </span>&lt;<span class="w"> </span>notes.ndjson
+<span class="go">50</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-s<span class="w"> </span>-c<span class="w"> </span><span class="s1">'max_by(.date) | {date, type: [.type.coding[].code]}'</span><span class="w"> </span>notes.ndjson
+<span class="go">{"date":"2026-10-10T01:47:23.124-04:00","type":["34117-2","51847-2"]}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-s<span class="w"> </span>-r<span class="w"> </span><span class="s1">'max_by(.date) | .content[0].attachment.data'</span><span class="w"> </span>notes.ndjson<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>base64<span class="w"> </span>-d
+
+<span class="go">2026-10-10</span>
+
+<span class="gp"># </span>Chief<span class="w"> </span>Complaint
+<span class="go">- Blurred Vision</span>
+
+
+<span class="gp"># </span>History<span class="w"> </span>of<span class="w"> </span>Present<span class="w"> </span>Illness
+<span class="go">Elvira561 Ester635 is a 52 year-old hispanic black female. Patient has a history of acute bacterial sinusitis (disorder), severe anxiety (panic) (finding), medication review due (situation), unemployed (finding), leaking dental filling (finding), viral sinusitis (disorder), part-time employment (finding), acute bronchitis (disorder), limited social contact (finding), reports of violence in the environment (finding), full-time employment (finding), dental filling lost (finding), gingivitis (disorder), myocardial infarction (disorder), loose dental filling (finding), stress (finding).</span>
+
+<span class="gp"># </span>Social<span class="w"> </span>History
+<span class="go">Patient is married. Patient has never smoked.</span>
+<span class="go"> Patient identifies as heterosexual.</span>
+
+<span class="go">Patient comes from a middle socioeconomic background.</span>
+<span class="go"> Patient has completed some college courses.</span>
+<span class="go">Patient currently has Medicare.</span>
+
+<span class="gp"># </span>Allergies
+<span class="go">No Known Allergies.</span>
+
+<span class="gp"># </span>Medications
+<span class="go">acetaminophen 325 mg oral tablet; 24 hr metformin hydrochloride 500 mg extended release oral tablet; 50 ml bivalirudin 5 mg/ml injection; hydrochlorothiazide 25 mg oral tablet; nitroglycerin 0.4 mg sublingual tablet; etonogestrel 68 mg drug implant; 3 ml liraglutide 6 mg/ml pen injector; 1 ml medroxyprogesterone acetate 150 mg/ml injection; aspirin 325 mg oral tablet; {28 (norethindrone 0.35 mg oral tablet) } pack [camila 28 day]; clopidogrel 300 mg oral tablet; sodium fluoride 0.0272 mg/mg oral gel</span>
+
+<span class="gp"># </span>Assessment<span class="w"> </span>and<span class="w"> </span>Plan
+<span class="go">Patient is presenting with loose dental filling (finding). </span>
+
+
+<span class="gp">#</span><span class="c1"># Plan</span>
+
+<span class="go">The following procedures were conducted:</span>
+<span class="go">- dental consultation and report (procedure)</span>
+<span class="go">- dental care (regime/therapy)</span>
+<span class="go">- removal of supragingival plaque and calculus from all teeth using dental instrument (procedure)</span>
+<span class="go">- removal of subgingival plaque and calculus from all teeth using dental instrument (procedure)</span>
+<span class="go">- dental plain x-ray bitewing (procedure)</span>
+<span class="go">- examination of gingivae (procedure)</span>
+<span class="go">- restoration of tooth with coverage of all cusps using dental filling material (procedure)</span>
+<span class="go">- dental fluoride treatment (procedure)</span>
+<span class="go">- oral health education (procedure)</span>
+<span class="go">The patient was prescribed the following medications:</span>
+<span class="go">- sodium fluoride 0.0272 mg/mg oral gel</span>
+</code></pre></div></div>
+
+<p>Read it against the coded data and list what only the note says. The chief
+complaint, “Blurred Vision”, is not coded anywhere for that visit. The note
+also states marital status, education, socioeconomic background and insurance
+in one place, and gives a medication list as prose. Some of this is coded
+elsewhere (smoking status is LOINC <code class="language-plaintext highlighter-rouge">72166-2</code>), some only as a
+questionnaire answer, some not at all. Synthea's notes are generated from the
+coded data, so they are tidier than real ones. Real notes add negations (“no
+chest pain”), family history and plans that never become orders, and that is
+why natural-language processing exists.</p>
+
+<p>Exchange between organizations in the US mostly uses documents, and the main
+format is <a href="https://www.hl7.org/implement/standards/product_brief.cfm?product_id=492">C-CDA</a>
+(Consolidated Clinical Document Architecture): XML with coded sections plus
+human-readable narrative. In FHIR, a document is referenced by a
+<a href="https://hl7.org/fhir/R4/documentreference.html">DocumentReference</a>,
+as here.</p>
+
+<h1 id="fhir-search">The same questions from a FHIR server</h1>
+
+<p>The earlier version of this week ran its example against the public HAPI
+test server. Public test servers hold whatever strangers upload, and you must
+never send them real data. We ran the same command against a local HAPI
+instead, so the data is our synthetic population. Synthea's bundles refer to
+each other with <code class="language-plaintext highlighter-rouge">urn:uuid:</code> references that only resolve inside
+the bundle, so <a href="static/files/week-2/to-tx.jq">to-tx.jq</a> builds
+one small transaction with the 22 patients and their 228 HbA1c results and
+rewrites the references to <code class="language-plaintext highlighter-rouge">Patient/&lt;id&gt;</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>hapi<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span>hapiproject/hapi:latest
+<span class="go">1661f551669d0991c331e3ee5956bf0e971db07c98bc20fb0fedc794187e5f12</span>
+<span class="gp">$ </span><span class="k">until</span><span class="w"> </span>curl<span class="w"> </span>-sf<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>localhost:8080/fhir/metadata<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>sleep<span class="w"> </span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:8080/fhir/metadata<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.software.version
+<span class="go">8.12.0</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-n<span class="w"> </span>-f<span class="w"> </span>to-tx.jq<span class="w"> </span>output/fhir/*.json<span class="w"> </span>&gt;<span class="w"> </span>tx.json
+<span class="gp">$ </span>jq<span class="w"> </span><span class="s1">'.entry | length'</span><span class="w"> </span>tx.json
+<span class="go">250</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:8080/fhir<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data-binary<span class="w"> </span>@tx.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[].response.status'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c
+<span class="go">    250 201 Created</span>
+<span class="gp">$ </span><span class="nv">URL</span><span class="o">=</span><span class="s1">'http://localhost:8080/fhir/Patient'</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-G<span class="w"> </span><span class="s2">"</span><span class="nv">$URL</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Accept: application/fhir+json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">_count</span><span class="o">=</span><span class="m">3</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">_elements</span><span class="o">=</span>name,birthDate<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[]?.resource | [.id, (.name[0].family // "?"), (.birthDate // "?")] | @tsv'</span>
+<span class="go">ee37362c-b39e-aeb4-e655-7b3461d5bf6b	Donnelly343	1959-07-26</span>
+<span class="go">bb61488c-df41-1159-ddc5-4a472c37a869	Kirlin939	1966-10-26</span>
+<span class="go">7ac5b274-b2f4-3454-295a-33bfe37fd9e9	Fahey393	1968-02-20</span>
+<span class="gp">$ </span><span class="nv">OBS</span><span class="o">=</span><span class="s1">'http://localhost:8080/fhir/Observation'</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-G<span class="w"> </span><span class="s2">"</span><span class="nv">$OBS</span><span class="s2">"</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">code</span><span class="o">=</span><span class="s1">'http://loinc.org|4548-4'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>value-quantity<span class="o">=</span>gt9<span class="w"> </span>-d<span class="w"> </span><span class="nv">_summary</span><span class="o">=</span>count<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">1</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-G<span class="w"> </span><span class="s2">"</span><span class="nv">$OBS</span><span class="s2">"</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">code</span><span class="o">=</span><span class="s1">'http://loinc.org|4548-4'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>value-quantity<span class="o">=</span>gt9<span class="w"> </span>-d<span class="w"> </span><span class="nv">date</span><span class="o">=</span>ge2025-10-31<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="nv">_summary</span><span class="o">=</span>count<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">0</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-G<span class="w"> </span><span class="s2">"</span><span class="nv">$OBS</span><span class="s2">"</span><span class="w"> </span>-d<span class="w"> </span><span class="nv">code</span><span class="o">=</span><span class="s1">'http://loinc.org|4548-4'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span>value-quantity<span class="o">=</span>gt8.2<span class="w"> </span>-d<span class="w"> </span><span class="nv">_summary</span><span class="o">=</span>count<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">13</span>
+<span class="gp">$ </span>docker<span class="w"> </span>rm<span class="w"> </span>-f<span class="w"> </span>hapi
+<span class="go">hapi</span>
+</code></pre></div></div>
+
+<p>The example is the one from the summary: <code class="language-plaintext highlighter-rouge">curl -G</code> sends the
+<code class="language-plaintext highlighter-rouge">-d</code> pairs as a query string, <code class="language-plaintext highlighter-rouge">_count</code> limits the page,
+<code class="language-plaintext highlighter-rouge">_elements</code> trims each resource, and jq turns the Bundle into
+tab-separated rows. The <code class="language-plaintext highlighter-rouge">?</code> in <code class="language-plaintext highlighter-rouge">.entry[]?</code> keeps an empty
+result from becoming an error. Then a third answer to Q1, from
+<a href="https://hl7.org/fhir/R4/search.html">FHIR search</a> parameters: a
+token search on <code class="language-plaintext highlighter-rouge">code</code> with system and code separated by
+<code class="language-plaintext highlighter-rouge">|</code>, a quantity search with the <code class="language-plaintext highlighter-rouge">gt</code> prefix, a date
+search, and <code class="language-plaintext highlighter-rouge">_summary=count</code> to return only the total. The server
+says 1 ever and 0 in the last year, like the other two tools, and 13 above
+8.2, like jq: it has FHIR's two decimals.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> HAPI 8.12.0 accepted all 250 PUTs in one
+  transaction (250 × <code class="language-plaintext highlighter-rouge">201 Created</code>), and the
+  <code class="language-plaintext highlighter-rouge">value-quantity=gt8.2</code> search counted the 8.21 results. We didn't
+  re-run the public-server version of the example; the command is unchanged
+  apart from the URL.</p>
+</blockquote>
+
+<h1 id="sql-server-and-reporting-databases">SQL Server and reporting databases</h1>
+
+<p>You will rarely query an EHR's live database. Vendors copy it nightly into
+a reporting database, and that is where analysts work. Epic's Clarity is the
+best-known example, and it is queried in SQL. Many of these run on Microsoft
+SQL Server, so if you target Microsoft shops, load the same CSVs into SQL
+Server and port the five questions to T-SQL. The ideas carry over unchanged:
+joins, <code class="language-plaintext highlighter-rouge">row_number() OVER (…)</code>, distinct counts, explicit time
+zones. The syntax differs in places, for example <code class="language-plaintext highlighter-rouge">TOP</code> instead of
+<code class="language-plaintext highlighter-rouge">LIMIT</code>, <code class="language-plaintext highlighter-rouge">DATEADD</code> for date arithmetic, and
+<code class="language-plaintext highlighter-rouge">TRY_CAST</code> to turn a non-numeric value into <code class="language-plaintext highlighter-rouge">NULL</code>
+instead of an error; the
+<a href="https://learn.microsoft.com/en-us/sql/t-sql/language-reference">T-SQL
+reference</a> has the details. We didn't run SQL Server for this page, so
+nothing here was tested against it.</p>
+
+<h1 id="canada-track">Canada track</h1>
+
+<p>Synthea's international configurations swap the geography, demographics and
+facilities. The <code class="language-plaintext highlighter-rouge">ca</code> folder from synthea-international is placed on
+the classpath ahead of the jar, so its <code class="language-plaintext highlighter-rouge">synthea.properties</code> and
+data files win:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>ls<span class="w"> </span>ca
+<span class="go">geography</span>
+<span class="go">payers</span>
+<span class="go">providers</span>
+<span class="go">synthea.properties</span>
+<span class="gp">$ </span>java<span class="w"> </span>-cp<span class="w"> </span>ca:synthea-with-dependencies.jar<span class="w"> </span>App<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span><span class="w"> </span>-s<span class="w"> </span><span class="m">7</span><span class="w"> </span>-cs<span class="w"> </span><span class="m">7</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--exporter.baseDirectory<span class="o">=</span>./output-ca<span class="w"> </span>Ontario<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>Records
+<span class="go">SLF4J: No SLF4J providers were found.</span>
+<span class="go">SLF4J: Defaulting to no-operation (NOP) logger implementation</span>
+<span class="go">SLF4J: See http://www.slf4j.org/codes.html#noProviders for further details.</span>
+<span class="go">Records: total=3, alive=3, dead=0</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.entry[].resource | select(.resourceType == "Patient")'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>output-ca/fhir/<span class="o">[</span>A-Z<span class="o">]</span>*.json<span class="w"> </span>&gt;<span class="w"> </span>ca-patients.ndjson
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'[.birthDate, .address[0].city, .address[0].postalCode] | @tsv'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>ca-patients.ndjson
+<span class="go">2004-11-16	London	N5Z</span>
+<span class="go">2003-11-06	Burlington	L7R</span>
+<span class="go">2012-03-07	Vaughan	L0J</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.identifier[]'</span><span class="w"> </span>ca-patients.ndjson<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'[.type.coding[0].code // "-", .system, .value] | @tsv'</span>
+<span class="go">-	https://github.com/synthetichealth/synthea	bb0f1798-a377-3418-41f5-a58c8c6ed14d</span>
+<span class="go">MR	http://hospital.smarthealthit.org	bb0f1798-a377-3418-41f5-a58c8c6ed14d</span>
+<span class="go">SS	http://hl7.org/fhir/sid/us-ssn	999-60-5596</span>
+<span class="go">DL	urn:oid:2.16.840.1.113883.4.3.25	S99975303</span>
+<span class="go">PPN	http://hl7.org/fhir/sid/passport-USA	X49812378X</span>
+<span class="go">-	https://github.com/synthetichealth/synthea	592ad309-7d98-4a5d-dbcb-2a5c6379c99e</span>
+<span class="go">MR	http://hospital.smarthealthit.org	592ad309-7d98-4a5d-dbcb-2a5c6379c99e</span>
+<span class="go">SS	http://hl7.org/fhir/sid/us-ssn	999-89-7145</span>
+<span class="go">DL	urn:oid:2.16.840.1.113883.4.3.25	S99953534</span>
+<span class="go">PPN	http://hl7.org/fhir/sid/passport-USA	X01004394X</span>
+<span class="go">-	https://github.com/synthetichealth/synthea	bfc9945a-0277-0b39-6d0f-cea74f9dbeef</span>
+<span class="go">MR	http://hospital.smarthealthit.org	bfc9945a-0277-0b39-6d0f-cea74f9dbeef</span>
+<span class="go">SS	http://hl7.org/fhir/sid/us-ssn	999-75-9769</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.. | objects | select(.system and .code) | .system'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>output-ca/fhir/<span class="o">[</span>A-Z<span class="o">]</span>*.json<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-u<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-v<span class="w"> </span>terminology
+<span class="go">http://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_29.html</span>
+<span class="go">http://hl7.org/fhir/sid/cvx</span>
+<span class="go">http://loinc.org</span>
+<span class="go">https://bluebutton.cms.gov/resources/codesystem/adjudication</span>
+<span class="go">https://bluebutton.cms.gov/resources/variables/line_cms_type_srvc_cd</span>
+<span class="go">http://snomed.info/sct</span>
+<span class="go">http://unitsofmeasure.org</span>
+<span class="go">http://www.nlm.nih.gov/research/umls/rxnorm</span>
+<span class="go">urn:ietf:bcp:47</span>
+<span class="go">urn:ietf:rfc:3986</span>
+</code></pre></div></div>
+
+<p>The addresses are Canadian, with only the first three characters of each
+postal code. The identifiers are not. The adults carry a US Social Security
+number, a Massachusetts driver's licence (the OID ending in
+<code class="language-plaintext highlighter-rouge">.4.3.25</code>) and a US passport; the patient born in 2012 carries
+only the SSN. The
+claims still use US Blue Button codes, and drugs and vaccines are RxNorm and
+CVX. That is fine for learning SQL and jq, and wrong for anything that will be
+shown as Canadian data.</p>
+
+<p>The Canada track asks you to fix that. Replace the US identifiers with a
+provincial health card number (use an <code class="language-plaintext highlighter-rouge">example.org</code> system for
+synthetic numbers, never a real issuer's), and map the RxNorm drugs to Health
+Canada DINs or CCDD codes. Check the result with a query, not by eye: no
+record should carry a <code class="language-plaintext highlighter-rouge">us-ssn</code>, <code class="language-plaintext highlighter-rouge">passport-USA</code> or US
+driver's-licence identifier. We didn't build the mapping for this page.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> Synthea's Canada config gave Ontario addresses
+  (3-character postal prefixes, one in the wrong city) but kept a US SSN,
+  passport and Massachusetts driver's licence on every patient, plus RxNorm and
+  CVX codes. Our 31 Oct run matches, except that the patient born in 2012 had
+  only the SSN.</p>
+</blockquote>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>SQL and jq agree, or each difference is written up.</li>
+  <li>Canada track: no record carries a US identifier.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>Why match codes on system + code instead of display text? Use the Q4
+  output to give two concrete ways display text fails.</li>
+  <li>Name two honest reasons SQL and jq counts can differ. For each, write
+  the one-line fix that makes them agree, and say which answer you would
+  report.</li>
+  <li>Which code system holds a lab test? A diagnosis? A drug? A vaccine? A
+  unit? Find one example of each in a Synthea FHIR bundle with jq.</li>
+  <li>Rewrite Q2 in SQL so both months and days are Boston-local, and show that
+  it now agrees with jq day by day since 2024.</li>
+  <li>Care gaps: list the patients with type 2 diabetes whose latest HbA1c is
+  more than six months old, or who have none. Do it in SQL with a
+  <code class="language-plaintext highlighter-rouge">LEFT JOIN</code> and in jq. Then delete one patient's HbA1c rows and
+  check that both queries still report that patient.</li>
+  <li>Write a jq program that produces exactly the observation rows the CSV
+  holds for one patient (flatten the components). Which rows can't you
+  produce, and why?</li>
+  <li>Add a sixth question of your own that involves a unit or a time window,
+  answer it both ways, and write up any difference in a table like the one
+  above.</li>
+  <li>Read one note and list the facts it holds that the coded data doesn't.
+  For each fact, find out whether it exists anywhere as a coded resource.</li>
+  <li>If you target Microsoft shops: load the CSVs into SQL Server and port
+  <code class="language-plaintext highlighter-rouge">load.sql</code> and Q1 to T-SQL (<code class="language-plaintext highlighter-rouge">TRY_CAST</code>,
+  <code class="language-plaintext highlighter-rouge">TOP</code>, <code class="language-plaintext highlighter-rouge">DATEADD</code>). Do the counts match PostgreSQL?</li>
+  <li>Canada track: swap the US identifiers for a health card number and map
+  RxNorm drugs to DIN/CCDD. Write a jq check that exits non-zero if any record
+  still carries a US identifier, and run it in CI.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://hl7.org/fhir/R4/search.html">FHIR search</a></li>
+  <li><a href="https://github.com/synthetichealth/synthea/wiki">Synthea CSV export</a></li>
+  <li><a href="https://connected-care.cihi.ca/en/products/v3/CACDI/">CACDI</a></li>
+  <li><a href="https://github.com/synthetichealth/synthea/wiki/CSV-File-Data-Dictionary">Synthea CSV data dictionary</a></li>
+  <li><a href="https://hl7.org/fhir/R4/observation.html">FHIR R4 Observation (components)</a></li>
+  <li><a href="https://hl7.org/fhir/R4/documentreference.html">FHIR R4 DocumentReference</a></li>
+  <li><a href="https://jqlang.org/manual/">jq manual</a></li>
+  <li><a href="https://www.postgresql.org/docs/16/functions-window.html">PostgreSQL 16: window functions</a></li>
+  <li><a href="https://loinc.org/license/">LOINC licence</a></li>
+  <li><a href="https://www.nlm.nih.gov/healthit/snomedct/index.html">SNOMED CT at the NLM</a></li>
+  <li><a href="https://www.nlm.nih.gov/research/umls/rxnorm/index.html">RxNorm</a></li>
+  <li><a href="https://ucum.org/">UCUM</a></li>
+  <li><a href="https://www.hl7.org/implement/standards/product_brief.cfm?product_id=492">HL7 C-CDA</a></li>
+  <li><a href="https://learn.microsoft.com/en-us/sql/t-sql/language-reference">T-SQL reference</a></li>
+  <li><a href="https://www.canada.ca/en/health-canada/services/drugs-health-products/drug-products/drug-product-database.html">Health Canada Drug Product Database (DIN)</a></li>
+  <li><a href="https://open.canada.ca/data/en/dataset/3e0a7b9e-a5e9-4131-bde4-ac685a1f1a38">Canadian Clinical Drug Data Set (CCDD)</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

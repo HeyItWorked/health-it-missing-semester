@@ -1,0 +1,10 @@
+{
+  "resourceType": "Patient",
+  "identifier": [{
+    "system": "https://genhosp.example.org/mrn",
+    "value": "100901"
+  }],
+  "name": [{"family": "Tremblay", "given": ["Marie"]}],
+  "gender": "female",
+  "birthDate": "1975-06-02"
+}

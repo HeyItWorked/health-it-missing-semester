@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 1 of the Health IT Missing Semester: How care works.">
+
+  <title>How care works &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">How care works</h1>
+<h2 class="subtitle">Week 1 · ~10 h</h2>
+
+<p>Health data is a by-product of clinical work. Nobody in a hospital types
+data for its own sake: a registration clerk types a name so the wristband
+prints, a nurse records a blood pressure because the next nurse needs it, a
+physician signs an order because the lab won't run a test without one. Every
+field you will query in this course was written by a person doing a job, at a
+particular moment, under time pressure. Know who records what, and when, or you
+will misread timestamps, statuses and identifiers in every later week.</p>
+
+<p>The mistakes reach patients. Stamp every event with the visit's start
+time, and an antibiotic seems to come before the test that justified it.
+Assume one medical record number per person, and one patient becomes two
+half-records, one of which holds the allergy.</p>
+
+<p>This lecture walks one patient through one emergency visit, from the
+front desk to the bill. We generate synthetic patients with Synthea, pick one
+emergency encounter, and use <code class="language-plaintext highlighter-rouge">jq</code> to find every FHIR resource that
+belongs to it: what was recorded, by whom, and when. Then we write the visit
+down twice, as a nurse would tell it and as a timeline that ties each sentence
+to a FHIR resource and field. That pair is your build for the week.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 with Synthea (master
+build of 21 Oct 2026) on OpenJDK 25.0.4.1, jq 1.7 and the Canada configuration
+from synthea-international. The outputs are copied from those runs. If you use
+the same seeds and reference date you should get the same patients; other
+Synthea builds will give different ones.</p>
+
+<h1 id="the-patient-journey">The patient journey</h1>
+
+<p>Most hospital visits follow the same eight steps, whatever the reason for
+the visit. Each step is done by a different person, and each leaves a
+different kind of record behind.</p>
+
+<ol>
+  <li><strong>Registration.</strong> A clerk finds or creates the patient's
+  record, checks identity and insurance, and opens a visit. Medical record
+  numbers, and duplicates, are born here.</li>
+  <li><strong>Triage.</strong> A nurse decides how urgent the patient is and
+  takes vital signs.</li>
+  <li><strong>Orders.</strong> A physician or nurse practitioner orders tests
+  and medications. An order is a request: it names what should happen.</li>
+  <li><strong>Results.</strong> A specimen is collected, the lab runs the
+  test, and results are verified and reviewed.</li>
+  <li><strong>Notes.</strong> Clinicians write what they found and
+  decided.</li>
+  <li><strong>Discharge.</strong> The patient goes home with prescriptions, or
+  is admitted or transferred.</li>
+  <li><strong>Coding.</strong> Coders read the record and assign standard
+  diagnosis and procedure codes.</li>
+  <li><strong>Billing.</strong> Codes become a claim to an insurer or
+  provincial plan, and a payment or denial comes back.</li>
+</ol>
+
+<p>Here is the same journey from the data's point of view: who usually records
+each step, and where it lands in FHIR R4. The rest of this lecture checks each
+row against real (synthetic) data.</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Step</th><th>Usually recorded by</th><th>Lands in FHIR R4</th></tr></thead>
+<tbody>
+<tr><td>Registration</td><td>Registration clerk</td><td><code class="language-plaintext highlighter-rouge">Patient.identifier</code>, <code class="language-plaintext highlighter-rouge">Encounter.class</code>, <code class="language-plaintext highlighter-rouge">Encounter.period.start</code></td></tr>
+<tr><td>Triage</td><td>Triage nurse</td><td><code class="language-plaintext highlighter-rouge">Observation</code> (vital signs, triage score), <code class="language-plaintext highlighter-rouge">Encounter.status</code></td></tr>
+<tr><td>Orders</td><td>Physician, nurse practitioner</td><td><code class="language-plaintext highlighter-rouge">ServiceRequest</code>, <code class="language-plaintext highlighter-rouge">MedicationRequest.requester</code></td></tr>
+<tr><td>Results</td><td>Nurse (specimen), lab, ordering clinician</td><td><code class="language-plaintext highlighter-rouge">Observation</code>, <code class="language-plaintext highlighter-rouge">DiagnosticReport</code></td></tr>
+<tr><td>Notes</td><td>Physician, nurse</td><td><code class="language-plaintext highlighter-rouge">DocumentReference</code>, <code class="language-plaintext highlighter-rouge">Condition</code>, <code class="language-plaintext highlighter-rouge">Procedure</code></td></tr>
+<tr><td>Discharge</td><td>Physician, nurse, clerk</td><td><code class="language-plaintext highlighter-rouge">Encounter.period.end</code>, <code class="language-plaintext highlighter-rouge">Encounter.status</code>, <code class="language-plaintext highlighter-rouge">MedicationRequest</code></td></tr>
+<tr><td>Coding</td><td>Health information (coding) staff</td><td><code class="language-plaintext highlighter-rouge">Claim.diagnosis</code>, <code class="language-plaintext highlighter-rouge">Claim.item</code></td></tr>
+<tr><td>Billing</td><td>Billing staff, insurer or provincial plan</td><td><code class="language-plaintext highlighter-rouge">Claim</code>, <code class="language-plaintext highlighter-rouge">ExplanationOfBenefit</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Clerks, nurses, physicians, pharmacists, lab staff, coders and billing
+staff all write to the same record, and access follows role: a clerk can
+change an address but not a diagnosis, a coder can read the chart but not
+change it. In FHIR the person shows up as a reference in fields like
+<code class="language-plaintext highlighter-rouge">performer</code>, <code class="language-plaintext highlighter-rouge">requester</code> or <code class="language-plaintext highlighter-rouge">author</code>. When
+those are empty, as they often are in Synthea, “who said this?” has no answer
+in the data.</p>
+
+<h1 id="generating-patients">Generating a small population</h1>
+
+<p><a href="https://github.com/synthetichealth/synthea/wiki">Synthea</a>
+simulates whole lives (illnesses, visits, medications, insurance) and exports
+each person as a FHIR bundle. It is a single jar, copied into our work
+directory:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-version<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-1
+<span class="go">openjdk version "25.0.4.1" 2026-08-18</span>
+<span class="gp">$ </span>jq<span class="w"> </span>--version
+<span class="go">jq-1.7</span>
+<span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-p<span class="w"> </span><span class="m">10</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span>-cs<span class="w"> </span><span class="m">42</span><span class="w"> </span>-r<span class="w"> </span><span class="m">20261031</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--exporter.fhir.use_us_core_ig<span class="o">=</span><span class="nb">false</span><span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-e<span class="w"> </span><span class="s1">' -- '</span><span class="w"> </span>-e<span class="w"> </span>Records
+<span class="go">9 -- Jody426 Hickle134 (8 y/o M) Newburyport, Massachusetts  (11454)</span>
+<span class="go">2 -- Wilfredo622 Fritsch593 (15 y/o M) Whitman, Massachusetts  (20437)</span>
+<span class="go">7 -- Wallace647 Effertz744 (16 y/o M) Revere, Massachusetts  (22632)</span>
+<span class="go">8 -- Lindsay928 Zieme486 (19 y/o F) Worcester, Massachusetts  (25223)</span>
+<span class="go">3 -- Ezekiel373 Walter473 (27 y/o M) Watertown, Massachusetts  (37347)</span>
+<span class="go">4 -- Shalanda398 Kelsie51 Jenkins714 (30 y/o F) Lowell, Massachusetts  (42162)</span>
+<span class="go">10 -- Cristobal567 Montero62 (79 y/o M) Saugus, Massachusetts  (109553)</span>
+<span class="go">5 -- Jona712 Bonnie873 Gibson10 (67 y/o F) Peabody, Massachusetts  (99777)</span>
+<span class="go">6 -- Tennille443 Denna536 Trantow673 (66 y/o F) Arlington, Massachusetts  (92068)</span>
+<span class="go">1 -- Corie618 Sofia418 Beahan375 (101 y/o F) Franklin, Massachusetts  (153177)</span>
+<span class="go">Records: total=10, alive=10, dead=0</span>
+<span class="gp">$ </span>ls<span class="w"> </span>output/fhir<span class="w"> </span><span class="p">|</span><span class="w"> </span>wc<span class="w"> </span>-l
+<span class="go">12</span>
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">-p 10</code> asks for ten living patients and <code class="language-plaintext highlighter-rouge">-s 42</code>
+seeds the population. <code class="language-plaintext highlighter-rouge">-cs 42</code> seeds the clinician generator and
+<code class="language-plaintext highlighter-rouge">-r 20261031</code> fixes the reference date that ages are computed from;
+without them each run uses the current time. The 12 files are one per patient
+plus two describing hospitals and practitioners.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> with <code class="language-plaintext highlighter-rouge">-s 42</code> and a fixed date, two runs
+  gave the same ten people but different clinician names, and leaving out
+  <code class="language-plaintext highlighter-rouge">-r</code> moved a birth date by a day. Adding <code class="language-plaintext highlighter-rouge">-cs 42 -r 20261031</code> made the patient files byte-for-byte
+  identical; only the hospital and practitioner file names, which carry a
+  timestamp, changed.</p>
+</blockquote>
+
+<p>Each file is a FHIR Bundle whose <code class="language-plaintext highlighter-rouge">entry</code> array holds every
+resource for that person. Counting resource types is the first thing to do
+with any bundle. We'll follow Lindsay928 Zieme486, 19, from Worcester (the
+digits are Synthea's, so nobody mistakes her for a real person):</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">p</span><span class="o">=</span><span class="k">$(</span>ls<span class="w"> </span>output/fhir/Lindsay928_*.json<span class="k">)</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[].resource.resourceType'</span><span class="w"> </span><span class="nv">$p</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-rn
+<span class="go">    183 Observation</span>
+<span class="go">     92 Procedure</span>
+<span class="go">     39 ExplanationOfBenefit</span>
+<span class="go">     39 Claim</span>
+<span class="go">     30 Encounter</span>
+<span class="go">     29 Condition</span>
+<span class="go">     17 Immunization</span>
+<span class="go">     17 DiagnosticReport</span>
+<span class="go">     12 SupplyDelivery</span>
+<span class="go">      9 MedicationRequest</span>
+<span class="go">      5 CareTeam</span>
+<span class="go">      5 CarePlan</span>
+<span class="go">      2 MedicationAdministration</span>
+<span class="go">      2 ImagingStudy</span>
+<span class="go">      2 Device</span>
+<span class="go">      1 Patient</span>
+</code></pre></div></div>
+
+<p>Observations dominate, as in real records: every vital sign and lab value
+is its own Observation. Then come Procedures, Claims with their
+ExplanationOfBenefit twins, and one Encounter per visit.</p>
+
+<p>Something is missing, though. Where are the notes? There is no
+DocumentReference in this list. The <code class="language-plaintext highlighter-rouge">--exporter.fhir.use_us_core_ig=false</code>
+flag came from an earlier version of this lab, where it kept the output plain
+FHIR R4. On this Synthea build, turning off the US Core profiles also turns off
+clinical notes. Run it again with the default, into a separate directory:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>java<span class="w"> </span>-jar<span class="w"> </span>synthea-with-dependencies.jar<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-p<span class="w"> </span><span class="m">10</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span>-cs<span class="w"> </span><span class="m">42</span><span class="w"> </span>-r<span class="w"> </span><span class="m">20261031</span><span class="w"> </span>--exporter.baseDirectory<span class="o">=</span>./uscore/<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>Records
+<span class="go">Records: total=10, alive=10, dead=0</span>
+<span class="gp">$ </span>cp<span class="w"> </span>uscore/fhir/Lindsay928_*.json<span class="w"> </span>lindsay.json
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entry[].resource.resourceType'</span><span class="w"> </span>lindsay.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-rn<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-8
+<span class="go">    183 Observation</span>
+<span class="go">     92 Procedure</span>
+<span class="go">     47 DiagnosticReport</span>
+<span class="go">     39 ExplanationOfBenefit</span>
+<span class="go">     39 Claim</span>
+<span class="go">     30 Encounter</span>
+<span class="go">     30 DocumentReference</span>
+<span class="go">     29 Condition</span>
+</code></pre></div></div>
+
+<p>Same people, plus 30 DocumentReferences: one clinical note per encounter.
+The 30 extra DiagnosticReports are the same notes wrapped as reports. From
+here on we use this file, copied to <code class="language-plaintext highlighter-rouge">lindsay.json</code>.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> an earlier version of this page quoted resource
+  counts from an older Synthea build, including DocumentReferences with US
+  Core turned off. This build gives the numbers above. Counts move between
+  builds, so never hard-code them in a test.</p>
+</blockquote>
+
+<h1 id="encounters">Encounters</h1>
+
+<p>An <a href="https://hl7.org/fhir/R4/encounter.html">Encounter</a> is one
+interaction between a patient and a provider: a clinic appointment, an
+emergency visit, a hospital stay, a video call. Two fields tell you what kind
+of encounter you're looking at and where it is in its life.</p>
+
+<p><code class="language-plaintext highlighter-rouge">Encounter.class</code> is the setting, coded from HL7's
+<a href="https://hl7.org/fhir/R4/v3/ActEncounterCode/vs.html">ActEncounterCode</a>
+list: <code class="language-plaintext highlighter-rouge">AMB</code> ambulatory (outpatient), <code class="language-plaintext highlighter-rouge">EMER</code> emergency,
+<code class="language-plaintext highlighter-rouge">IMP</code> inpatient, <code class="language-plaintext highlighter-rouge">HH</code> home health, <code class="language-plaintext highlighter-rouge">VR</code>
+virtual, and a few more. Inpatient means the patient was admitted to a bed;
+an emergency visit can end in discharge home or in an admission, which starts
+a new inpatient encounter. <code class="language-plaintext highlighter-rouge">Encounter.status</code> is the
+<a href="https://hl7.org/fhir/R4/valueset-encounter-status.html">lifecycle
+state</a>: <code class="language-plaintext highlighter-rouge">planned</code>, <code class="language-plaintext highlighter-rouge">arrived</code>, <code class="language-plaintext highlighter-rouge">triaged</code>,
+<code class="language-plaintext highlighter-rouge">in-progress</code>, <code class="language-plaintext highlighter-rouge">onleave</code>, <code class="language-plaintext highlighter-rouge">finished</code>,
+<code class="language-plaintext highlighter-rouge">cancelled</code>, <code class="language-plaintext highlighter-rouge">entered-in-error</code> or
+<code class="language-plaintext highlighter-rouge">unknown</code>. Count them across all ten patients:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "Encounter")</span>
+<span class="go">  | "\(.class.code) \(.status)"' uscore/fhir/[A-Z]*.json \</span>
+<span class="go">  | sort | uniq -c | sort -rn</span>
+<span class="go">    522 AMB finished</span>
+<span class="go">     22 EMER finished</span>
+<span class="go">     15 IMP finished</span>
+<span class="go">     10 VR finished</span>
+<span class="go">      2 HH finished</span>
+</code></pre></div></div>
+
+<p>Mostly ambulatory, as in life. And every encounter is
+<code class="language-plaintext highlighter-rouge">finished</code>, because Synthea writes the record after the simulation
+ends. In a live system an emergency encounter moves through
+<code class="language-plaintext highlighter-rouge">arrived</code>, <code class="language-plaintext highlighter-rouge">triaged</code> and <code class="language-plaintext highlighter-rouge">in-progress</code>, and a
+query at 12:15 sees a different status from one at 15:00. FHIR keeps the
+history in <code class="language-plaintext highlighter-rouge">Encounter.statusHistory</code>, if anyone fills it in.</p>
+
+<p>Lindsay has two emergency visits and no inpatient stays. We take the second
+and save its id in <code class="language-plaintext highlighter-rouge">enc</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "Encounter")</span>
+<span class="go">  | select(.class.code == "EMER" or .class.code == "IMP")</span>
+<span class="go">  | [.class.code, .period.start[0:16],</span>
+<span class="go">     .reasonCode[0].coding[0].display] | @tsv' lindsay.json</span>
+<span class="go">EMER	2020-02-19T01:51	Sprain (morphologic abnormality)</span>
+<span class="go">EMER	2023-03-19T11:55	Acute infective cystitis (disorder)</span>
+<span class="gp">$ </span><span class="nv">enc</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "Encounter")</span>
+<span class="go">  | select(.period.start | startswith("2023-03-19"))</span>
+<span class="go">  | .id' lindsay.json)</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="nv">$enc</span>
+<span class="go">46976cf7-b0bf-be20-0135-e424294d3c62</span>
+</code></pre></div></div>
+
+<p>Every terminal below starts with <code class="language-plaintext highlighter-rouge">enc</code> set to that id. Here is
+the Encounter itself, trimmed to the fields we care about:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>--arg<span class="w"> </span>enc<span class="w"> </span><span class="nv">$enc</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.id<span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nv">$enc</span><span class="o">)</span>
+<span class="go">  | {class: .class.code, status, statusHistory, period,</span>
+<span class="go">     type: .type[0].text,</span>
+<span class="go">     reason: .reasonCode[0].coding[0].display,</span>
+<span class="go">     who: .participant[0].individual.display}' lindsay.json</span>
+<span class="go">{</span>
+<span class="go">  "class": "EMER",</span>
+<span class="go">  "status": "finished",</span>
+<span class="go">  "statusHistory": null,</span>
+<span class="go">  "period": {</span>
+<span class="go">    "start": "2023-03-19T11:55:36-04:00",</span>
+<span class="go">    "end": "2023-03-19T14:19:32-04:00"</span>
+<span class="go">  },</span>
+<span class="go">  "type": "Encounter for symptom (procedure)",</span>
+<span class="go">  "reason": "Acute infective cystitis (disorder)",</span>
+<span class="go">  "who": "Dr. Angele108 Bogan287"</span>
+<span class="go">}</span>
+</code></pre></div></div>
+
+<p>A visit of just under two and a half hours for acute infective cystitis, a
+bladder infection (see
+<a href="https://medlineplus.gov/urinarytractinfections.html">MedlinePlus</a>
+if, like most engineers, you need the clinical term explained). One
+practitioner is listed. <code class="language-plaintext highlighter-rouge">statusHistory</code> is empty, as expected.</p>
+
+<h2 id="adt-events">ADT events: the messages that announce the workflow</h2>
+
+<p>Synthea hands us the finished record. A hospital's systems learn about the
+visit while it happens, from <em>ADT</em> (admit, discharge, transfer)
+messages in HL7 version 2 that registration sends at each step. Week 3
+(<a href="week-3.html">HL7 v2 + patient identity</a>) takes these messages
+apart byte by byte; this week, just learn the five you'll meet most and what
+each one would change in FHIR:</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Event</th><th>HL7 v2 name</th><th>What happened</th><th>Typical FHIR effect</th></tr></thead>
+<tbody>
+<tr><td><code class="language-plaintext highlighter-rouge">A04</code></td><td>Register a patient</td><td>Clerk registers an outpatient or emergency arrival</td><td>Encounter created, <code class="language-plaintext highlighter-rouge">class</code> <code class="language-plaintext highlighter-rouge">EMER</code> or <code class="language-plaintext highlighter-rouge">AMB</code>, <code class="language-plaintext highlighter-rouge">status</code> <code class="language-plaintext highlighter-rouge">arrived</code></td></tr>
+<tr><td><code class="language-plaintext highlighter-rouge">A01</code></td><td>Admit/visit notification</td><td>Patient admitted to a bed</td><td>Encounter with <code class="language-plaintext highlighter-rouge">class</code> <code class="language-plaintext highlighter-rouge">IMP</code>, <code class="language-plaintext highlighter-rouge">status</code> <code class="language-plaintext highlighter-rouge">in-progress</code>, <code class="language-plaintext highlighter-rouge">location</code></td></tr>
+<tr><td><code class="language-plaintext highlighter-rouge">A02</code></td><td>Transfer a patient</td><td>Patient moves to another unit, room or bed</td><td>New <code class="language-plaintext highlighter-rouge">Encounter.location</code> entry; the old one gets an end time</td></tr>
+<tr><td><code class="language-plaintext highlighter-rouge">A03</code></td><td>Discharge/end visit</td><td>Patient leaves</td><td><code class="language-plaintext highlighter-rouge">status</code> <code class="language-plaintext highlighter-rouge">finished</code>, <code class="language-plaintext highlighter-rouge">period.end</code>, <code class="language-plaintext highlighter-rouge">hospitalization.dischargeDisposition</code></td></tr>
+<tr><td><code class="language-plaintext highlighter-rouge">A08</code></td><td>Update patient information</td><td>Clerk corrects or adds details</td><td>Patient or Encounter fields updated; no new encounter</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>For Lindsay's visit, a typical feed would carry an <code class="language-plaintext highlighter-rouge">A04</code> when
+she was registered at 11:55, perhaps an <code class="language-plaintext highlighter-rouge">A08</code> if the clerk fixed
+her phone number while she waited, and an <code class="language-plaintext highlighter-rouge">A03</code> when she left at
+14:19. Had she been admitted, an <code class="language-plaintext highlighter-rouge">A01</code> would have opened an
+inpatient encounter, and every move between units would have sent an
+<code class="language-plaintext highlighter-rouge">A02</code>. Exactly which events a site sends, and with which fields
+filled in, is written in each interface's specification; the HL7
+<a href="https://build.fhir.org/ig/HL7/v2-to-fhir/">v2-to-FHIR</a> project
+publishes suggested mappings.</p>
+
+<h1 id="tracing-an-encounter">Everything that points at the encounter</h1>
+
+<p>The Encounter is the hub, but it doesn't list its spokes: the
+Observations, Procedures and the rest each carry a reference
+<em>to</em> the encounter. Inside a Synthea bundle, references use the
+<code class="language-plaintext highlighter-rouge">urn:uuid:</code> form of the target's id, so a blunt but effective way to
+find everything that mentions our visit is to turn each resource into a string
+and search it:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(tostring | contains($ref)) | .resourceType' \</span>
+<span class="go">  lindsay.json | sort | uniq -c | sort -rn</span>
+<span class="go">     21 Observation</span>
+<span class="go">     10 Procedure</span>
+<span class="go">      2 ExplanationOfBenefit</span>
+<span class="go">      2 DiagnosticReport</span>
+<span class="go">      2 Claim</span>
+<span class="go">      1 Provenance</span>
+<span class="go">      1 MedicationRequest</span>
+<span class="go">      1 DocumentReference</span>
+</code></pre></div></div>
+
+<p>Forty resources. The Claims and EOBs point at the encounter from inside
+their <code class="language-plaintext highlighter-rouge">item</code> lists, which is why we searched whole resources. The
+Provenance isn't really about this visit: it lists every resource in the
+bundle. String search is fine for exploring; in code, follow named fields such
+as <code class="language-plaintext highlighter-rouge">Observation.encounter</code>.</p>
+
+<p>Now sort them by time. Every resource has its <em>own</em> time field, and
+they have different names: <code class="language-plaintext highlighter-rouge">Observation.effectiveDateTime</code>,
+<code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code>,
+<code class="language-plaintext highlighter-rouge">MedicationRequest.authoredOn</code>,
+<code class="language-plaintext highlighter-rouge">DocumentReference.date</code>, <code class="language-plaintext highlighter-rouge">Claim.created</code>. This filter
+(download <a href="static/files/week-1/timeline.jq">timeline.jq</a>) picks the
+first one each resource has, groups rows that share a minute and a field, and
+prints the count:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code># Every resource in a Synthea bundle that points at one
+# encounter, sorted by its own clinical time.
+# Usage: jq -r --arg enc ENCOUNTER_ID -f timeline.jq BUNDLE
+# Prints: time  count  Resource.field  what (+N more kinds)
+
+# The field that says when this resource happened.
+def when:
+  [ [&quot;effectiveDateTime&quot;, .effectiveDateTime],
+    [&quot;performedPeriod.start&quot;, .performedPeriod.start],
+    [&quot;authoredOn&quot;, .authoredOn],
+    [&quot;date&quot;, .date],
+    [&quot;created&quot;, .created] ]
+  | map(select(.[1] != null)) | first;
+
+def what:
+  (.code.text // .code.coding[0].display
+   // .medicationCodeableConcept.text
+   // .category[0].coding[0].code // .type.coding[0].code
+   // &quot;&quot;)
+  | sub(&quot; \\([a-z/ ]+\\)$&quot;; &quot;&quot;);
+
+def rows:
+  if .resourceType == &quot;Encounter&quot; then
+    [.period.start, &quot;Encounter.period.start&quot;, .class.code],
+    [.period.end, &quot;Encounter.period.end&quot;, .status]
+  else
+    when as $w | [$w[1], .resourceType + &quot;.&quot; + $w[0], what]
+  end;
+
+(&quot;urn:uuid:&quot; + $enc) as $ref
+| [ .entry[].resource
+    # Provenance lists every resource in the bundle; skip it.
+    | select(.resourceType != &quot;Provenance&quot;)
+    | select(.id == $enc or (tostring | contains($ref)))
+    | rows ]
+| group_by(.[0][0:16] + .[1])
+| sort_by(.[0][0])
+| .[]
+| (map(.[2]) | unique) as $w
+| &quot;\(.[0][0][11:16])  \(length)  \(.[0][1])  \($w[0][0:22])&quot;
+  + (if ($w | length) &gt; 1 then &quot; +\($w | length - 1)&quot; else &quot;&quot; end)
+</code></pre></div></div>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>enc<span class="w"> </span><span class="nv">$enc</span><span class="w"> </span>-f<span class="w"> </span>timeline.jq<span class="w"> </span>lindsay.json
+<span class="go">11:55  1  DiagnosticReport.effectiveDateTime  History and physical n</span>
+<span class="go">11:55  1  Encounter.period.start  EMER</span>
+<span class="go">11:55  1  Procedure.performedPeriod.start  History taking</span>
+<span class="go">11:55  1  DocumentReference.date  clinical-note</span>
+<span class="go">12:04  1  Procedure.performedPeriod.start  Discussion about signs</span>
+<span class="go">12:10  1  Procedure.performedPeriod.start  Triage: emergency cent</span>
+<span class="go">12:25  1  Procedure.performedPeriod.start  Taking patient vital s</span>
+<span class="go">12:30  6  Observation.effectiveDateTime  Blood Pressure panel w +5</span>
+<span class="go">12:30  1  Procedure.performedPeriod.start  History and physical e</span>
+<span class="go">13:29  1  Procedure.performedPeriod.start  Urinalysis with reflex</span>
+<span class="go">13:39  1  Procedure.performedPeriod.start  Urine specimen collect</span>
+<span class="go">13:49  1  Procedure.performedPeriod.start  Urinalysis with reflex</span>
+<span class="go">13:59  1  DiagnosticReport.effectiveDateTime  Urinalysis macro (dips</span>
+<span class="go">13:59  15  Observation.effectiveDateTime  Bacteria [#/area] in U +14</span>
+<span class="go">13:59  1  Procedure.performedPeriod.start  Antibiotic therapy</span>
+<span class="go">14:09  1  MedicationRequest.authoredOn  nitrofurantoin, macroc</span>
+<span class="go">14:09  1  Procedure.performedPeriod.start  Patient discharge</span>
+<span class="go">14:19  2  Claim.created  institutional +1</span>
+<span class="go">14:19  1  Encounter.period.end  finished</span>
+<span class="go">14:19  2  ExplanationOfBenefit.created  institutional +1</span>
+</code></pre></div></div>
+
+<h2 id="the-encounter-start-trap">The encounter start is not the time of everything in it</h2>
+
+<p>Read the left column. The encounter started at 11:55, but triage happened
+at 12:10, the urine sample was collected at 13:39, the results were recorded
+at 13:59 and the prescription was written at 14:09. If a dashboard stamps
+every event with the encounter's start time, the antibiotic appears to have
+been chosen more than two hours before there was any evidence for it, and a
+report of “time from arrival to antibiotic” comes out as zero. For an
+inpatient stay the error is days, not hours.</p>
+
+<p>Watch out for taking the encounter's start time as the time of every
+event in it. The rule: <strong>use the time field of the resource that describes the
+event</strong>, and treat <code class="language-plaintext highlighter-rouge">Encounter.period</code> as the frame around
+them. When a resource has no time of its own, say so in your analysis rather
+than borrowing the encounter's.</p>
+
+<p>The timeline also shows that charting lags the care. Triage starts at
+12:10 and vitals are taken at 12:25, but the six Observations holding the
+triage score and vital signs are stamped 12:30. In real data the gaps are
+bigger, and some charting happens after the patient has left.</p>
+
+<h1 id="orders-and-results">Orders, specimens and results</h1>
+
+<p>In a real hospital, the lab half of the journey has distinct moments: a
+physician orders a urinalysis (in FHIR, a ServiceRequest), a nurse collects
+the specimen (a Specimen with its collection time), the lab receives and runs
+it, results are verified and released, and the ordering clinician reviews them.
+In FHIR the results land as Observations, grouped under a
+<a href="https://hl7.org/fhir/R4/diagnosticreport.html">DiagnosticReport</a>
+that points back to the order through <code class="language-plaintext highlighter-rouge">basedOn</code>. Let's see what
+Synthea kept:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "DiagnosticReport")</span>
+<span class="go">  | select(.encounter.reference == $ref)</span>
+<span class="go">  | {code: .code.coding[0].display, status,</span>
+<span class="go">     effectiveDateTime, issued, results: (.result | length),</span>
+<span class="go">     performer: .performer[0].display}' lindsay.json</span>
+<span class="go">{</span>
+<span class="go">  "code": "Urinalysis macro (dipstick) panel - Urine",</span>
+<span class="go">  "status": "final",</span>
+<span class="go">  "effectiveDateTime": "2023-03-19T13:59:32-04:00",</span>
+<span class="go">  "issued": "2023-03-19T13:59:32.082-04:00",</span>
+<span class="go">  "results": 14,</span>
+<span class="go">  "performer": "COMFORT HOME CARE, LLC"</span>
+<span class="go">}</span>
+<span class="go">{</span>
+<span class="go">  "code": "History and physical note",</span>
+<span class="go">  "status": "final",</span>
+<span class="go">  "effectiveDateTime": "2023-03-19T11:55:36-04:00",</span>
+<span class="go">  "issued": "2023-03-19T11:55:36.082-04:00",</span>
+<span class="go">  "results": 0,</span>
+<span class="go">  "performer": "Dr. Angele108 Bogan287"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "Observation")</span>
+<span class="go">  | select(.encounter.reference == $ref)</span>
+<span class="go">  | select(.code.text | test("severity|Nitrite|Leukocyte est"))</span>
+<span class="go">  | [.effectiveDateTime[11:19], .issued[11:23],</span>
+<span class="go">     .code.text[0:30], .valueCodeableConcept.text] | @tsv' \</span>
+<span class="go">  lindsay.json</span>
+<span class="go">12:30:22	12:30:22.082	Emergency severity index [ESI]	Needs 1 resource</span>
+<span class="go">13:59:32	13:59:32.082	Nitrite [Presence] in Urine by	Nitrite detected in urine (finding)</span>
+<span class="go">13:59:32	13:59:32.082	Leukocyte esterase [Presence] 	Urine leukocyte test one plus (finding)</span>
+</code></pre></div></div>
+
+<p>Two reports. The urinalysis groups 14 result Observations; the other
+report is the clinical note again. The fields to understand are
+<code class="language-plaintext highlighter-rouge">effectiveDateTime</code> and <code class="language-plaintext highlighter-rouge">issued</code>. FHIR defines
+Observation's <code class="language-plaintext highlighter-rouge">effective</code> as the
+<a href="https://hl7.org/fhir/R4/observation-definitions.html#Observation.effective_x_">“physiologically relevant time”</a>,
+usually the time of the procedure or of specimen collection, and the report's
+<code class="language-plaintext highlighter-rouge">issued</code> as the time this version of the report was made available,
+typically after review and verification. In real data, <code class="language-plaintext highlighter-rouge">issued</code> is
+minutes to days after <code class="language-plaintext highlighter-rouge">effective</code>, and the gap is the turnaround
+time that lab managers watch.</p>
+
+<p>Synthea collapses all of that: <code class="language-plaintext highlighter-rouge">issued</code> is 82 milliseconds
+after <code class="language-plaintext highlighter-rouge">effective</code>, and <code class="language-plaintext highlighter-rouge">effective</code> is the result time
+(13:59), not the collection time (13:39, which exists only as a Procedure).
+The bundle has no ServiceRequest or Specimen at all, so the order exists only
+as the “Urinalysis with reflex…” Procedures. Learn the shape from Synthea, not
+the lab timing.</p>
+
+<p>The first line is the triage score charted at 12:30, on the
+<a href="https://www.ahrq.gov/patient-safety/settings/emergency-dept/esi.html">Emergency
+Severity Index</a>, a five-level triage scale that sorts less urgent patients
+by how many resources (tests, imaging, IV fluids) they're likely to need. The
+urine results read like an infection: nitrite detected, leukocyte esterase
+“one plus”. Who records a lab result? The instrument or technologist
+produces the value, the lab verifies it, and the report's
+<code class="language-plaintext highlighter-rouge">performer</code> names the lab. Here the performer is a home care
+agency: Synthea's provider assignment isn't always realistic.</p>
+
+<h1 id="who-recorded-what">Who recorded what</h1>
+
+<p>For each resource in the visit, which “who” fields are filled in? FHIR has
+several, each with a precise meaning: <code class="language-plaintext highlighter-rouge">performer</code> did it,
+<code class="language-plaintext highlighter-rouge">requester</code> asked for it, <code class="language-plaintext highlighter-rouge">author</code> wrote it,
+<code class="language-plaintext highlighter-rouge">recorder</code> typed it, <code class="language-plaintext highlighter-rouge">asserter</code> vouched for it.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>enc<span class="w"> </span><span class="nv">$enc</span><span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>
+<span class="go">  .entry[].resource</span>
+<span class="go">  | select(.id == $enc or (tostring | contains($ref)))</span>
+<span class="go">  | select(.resourceType != "Provenance")</span>
+<span class="go">  | ["participant", "performer", "requester", "author",</span>
+<span class="go">     "recorder", "asserter", "provider"] as $who</span>
+<span class="go">  | "\(.resourceType): \([$who[] as $k | select(has($k))</span>
+<span class="go">     | $k] | join(" "))"' lindsay.json | sort | uniq -c</span>
+<span class="go">      2 Claim: provider</span>
+<span class="go">      2 DiagnosticReport: performer</span>
+<span class="go">      1 DocumentReference: author</span>
+<span class="go">      1 Encounter: participant</span>
+<span class="go">      2 ExplanationOfBenefit: provider</span>
+<span class="go">      1 MedicationRequest: requester</span>
+<span class="go">     21 Observation: </span>
+<span class="go">     10 Procedure: </span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "MedicationRequest")</span>
+<span class="go">  | select(.encounter.reference == $ref)</span>
+<span class="go">  | .authoredOn, .requester.display,</span>
+<span class="go">    .medicationCodeableConcept.text' lindsay.json</span>
+<span class="go">2023-03-19T14:09:32-04:00</span>
+<span class="go">Dr. Angele108 Bogan287</span>
+<span class="go">nitrofurantoin, macrocrystals 25 MG / nitrofurantoin, monohydrate 75 MG Oral Capsule</span>
+</code></pre></div></div>
+
+<p>The 21 Observations and 10 Procedures, including the triage and vital
+signs a nurse would have done, name nobody. A production system would carry
+<code class="language-plaintext highlighter-rouge">Observation.performer</code> on vitals, so you could ask “which nurse
+took these?” In Synthea, the one physician on the encounter is the only
+person in the room.</p>
+
+<p><code class="language-plaintext highlighter-rouge">MedicationRequest.requester</code> is the clearest case: the
+<a href="https://hl7.org/fhir/R4/medicationrequest.html">specification</a>
+defines it as who initiated the request and is responsible for its
+activation. It's the prescriber, not the pharmacist who fills it and not the
+nurse who hands over the first dose. Pharmacy's work would show up as a
+MedicationDispense, and the nurse's as a MedicationAdministration, each with
+its own time.</p>
+
+<h2 id="follow-references">Follow references, then check them</h2>
+
+<p>The prescription says why it was written, through
+<code class="language-plaintext highlighter-rouge">reasonReference</code>. Follow it, and look at every cystitis Condition
+in the record next to the encounter each one claims to come from:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "MedicationRequest")</span>
+<span class="go">  | select(.encounter.reference == $ref)</span>
+<span class="go">  | .reasonReference[0].reference' lindsay.json</span>
+<span class="go">urn:uuid:46976cf7-b0bf-be20-7c94-958542c8b48e</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span><span class="o">[</span>.entry<span class="o">[]</span>.resource<span class="o">]</span><span class="w"> </span>as<span class="w"> </span><span class="nv">$r</span>
+<span class="go">  | ($r | map(select(.resourceType == "Encounter")</span>
+<span class="go">      | {key: ("urn:uuid:" + .id),</span>
+<span class="go">         value: (.period.start[0:10] + " " + .class.code)})</span>
+<span class="go">      | from_entries) as $when</span>
+<span class="go">  | $r[] | select(.resourceType == "Condition")</span>
+<span class="go">  | select(.code.text | test("cystitis"))</span>
+<span class="go">  | [.id[24:], .onsetDateTime[0:10],</span>
+<span class="go">     .abatementDateTime[0:10], $when[.encounter.reference]]</span>
+<span class="go">  | @tsv' lindsay.json</span>
+<span class="go">958542c8b48e	2022-10-14	2022-10-14	2021-11-12 AMB</span>
+<span class="go">9686c12c3106	2023-03-13	2023-03-20	2022-11-18 AMB</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.resourceType<span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"Encounter"</span><span class="o">)</span>
+<span class="go">  | select(.period.start | startswith("2023-03"))</span>
+<span class="go">  | [.period.start[0:16], .class.code, .type[0].text]</span>
+<span class="go">  | @tsv' lindsay.json</span>
+<span class="go">2023-03-13T20:33	VR	Videotelephony encounter (procedure)</span>
+<span class="go">2023-03-15T18:15	AMB	Encounter for problem (procedure)</span>
+<span class="go">2023-03-17T16:35	VR	Indirect encounter (procedure)</span>
+<span class="go">2023-03-19T11:55	EMER	Encounter for symptom (procedure)</span>
+</code></pre></div></div>
+
+<p>The prescription points at <code class="language-plaintext highlighter-rouge">…958542c8b48e</code>, a cystitis that
+began and ended on 14 Oct 2022, five months before this visit. The current
+episode, <code class="language-plaintext highlighter-rouge">…9686c12c3106</code>, began on 13 Mar 2023 and resolved on the
+20th, but its <code class="language-plaintext highlighter-rouge">Condition.encounter</code> points to a well-child visit
+from November 2022, four months before the infection started. Both links are
+valid references to resources that exist; neither is right.</p>
+
+<blockquote>
+  <p>Synthetic data has wiring bugs too. A reference that resolves is not a
+  reference that makes sense: compare the times at both ends before you
+  trust it. Real records have the same problem when a note is attached to the
+  wrong visit or a problem is entered at a later appointment.</p>
+</blockquote>
+
+<p>Conditions are also a reminder that a diagnosis doesn't belong to one
+visit. The third command shows that the episode ran across four encounters in
+a week: a video visit, a clinic visit, an indirect follow-up, then the
+emergency visit. <code class="language-plaintext highlighter-rouge">Condition.onsetDateTime</code> says when the problem
+began, <code class="language-plaintext highlighter-rouge">recordedDate</code> when someone wrote it down,
+<code class="language-plaintext highlighter-rouge">abatementDateTime</code> when it ended. None of them is the encounter's
+start.</p>
+
+<h1 id="notes-coding-and-billing">Notes, discharge, coding and billing</h1>
+
+<p>The clinical note is a DocumentReference with base64 text in
+<code class="language-plaintext highlighter-rouge">content[0].attachment.data</code>. Decode it and pick out three
+lines:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "DocumentReference")</span>
+<span class="go">  | select(.context.encounter[0].reference == $ref)</span>
+<span class="go">  | .date, (.content[0].attachment.data | @base64d)' \</span>
+<span class="go">  lindsay.json | grep -o -e '^20[-0-9T:.]*' \</span>
+<span class="go">    -e 'is a [0-9]* year-old' -e '^- .*discharge.*'</span>
+<span class="go">2023-03-19T11:55:36.082-04:00</span>
+<span class="go">2023-03-19</span>
+<span class="go">is a 15 year-old</span>
+<span class="go">- patient discharge (procedure)</span>
+</code></pre></div></div>
+
+<p>The note is dated 11:55, when Lindsay arrived, yet it lists her discharge,
+which the timeline puts at 14:09. It also gives her age at the visit, 15. Real notes carry the time
+they were written or signed, often hours later. Either way, a note's date is
+about the document, not the events in it.</p>
+
+<p>Discharge appears twice: a “Patient discharge” Procedure at 14:09 and
+<code class="language-plaintext highlighter-rouge">Encounter.period.end</code> at 14:19. For inpatient stays, FHIR also
+records where the patient went in
+<code class="language-plaintext highlighter-rouge">Encounter.hospitalization.dischargeDisposition</code>.</p>
+
+<p>Then the back office takes over. Coders turn the record into standard
+codes, and billing turns codes into a
+<a href="https://hl7.org/fhir/R4/claim.html">Claim</a>. For this visit Synthea
+produced one claim for the institution's services and another for the
+prescription, and paired each with an
+<a href="https://hl7.org/fhir/R4/explanationofbenefit.html">ExplanationOfBenefit</a>
+(what the insurer decided):</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "Claim")</span>
+<span class="go">  | select(.item[0].encounter[0].reference == $ref)</span>
+<span class="go">  | {type: .type.coding[0].code, created,</span>
+<span class="go">     payer: .insurance[0].coverage.display,</span>
+<span class="go">     diagnosis, items: (.item | length),</span>
+<span class="go">     codes: [.item[].productOrService.coding[0].system]</span>
+<span class="go">       | unique,</span>
+<span class="go">     total: "\(.total.value) \(.total.currency)"}' \</span>
+<span class="go">  lindsay.json</span>
+<span class="go">{</span>
+<span class="go">  "type": "pharmacy",</span>
+<span class="go">  "created": "2023-03-19T14:19:32-04:00",</span>
+<span class="go">  "payer": "Humana",</span>
+<span class="go">  "diagnosis": null,</span>
+<span class="go">  "items": 1,</span>
+<span class="go">  "codes": [</span>
+<span class="go">    "http://www.nlm.nih.gov/research/umls/rxnorm"</span>
+<span class="go">  ],</span>
+<span class="go">  "total": "129.94 USD"</span>
+<span class="go">}</span>
+<span class="go">{</span>
+<span class="go">  "type": "institutional",</span>
+<span class="go">  "created": "2023-03-19T14:19:32-04:00",</span>
+<span class="go">  "payer": "Humana",</span>
+<span class="go">  "diagnosis": null,</span>
+<span class="go">  "items": 12,</span>
+<span class="go">  "codes": [</span>
+<span class="go">    "http://loinc.org",</span>
+<span class="go">    "http://snomed.info/sct"</span>
+<span class="go">  ],</span>
+<span class="go">  "total": "4476.29 USD"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>ref<span class="w"> </span><span class="s2">"urn:uuid:</span><span class="nv">$enc</span><span class="s2">"</span><span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource
+<span class="go">  | select(.resourceType == "ExplanationOfBenefit")</span>
+<span class="go">  | select(.item[0].encounter[0].reference == $ref)</span>
+<span class="go">  | "\(.type.coding[0].code): \(.total[0].amount.value)"</span>
+<span class="go">    + " billed, \(.payment.amount.value) paid"' lindsay.json</span>
+<span class="go">pharmacy: 129.94 billed, 0.0 paid</span>
+<span class="go">institutional: 4476.29 billed, 3581.0319999999997 paid</span>
+</code></pre></div></div>
+
+<p>Three things to notice. Both claims are created at 14:19, when the visit
+ended: billing happens after the care, and a claim's dates are the worst
+possible source for the time of a clinical event. The claims carry no
+<code class="language-plaintext highlighter-rouge">diagnosis</code>, and the institutional claim's items are coded in
+SNOMED CT and LOINC, the languages of the chart. Real US claims carry
+<a href="https://www.cms.gov/medicare/coding-billing/icd-10-codes">ICD-10-CM</a>
+diagnosis codes and procedure codes from billing code sets, and in Canada,
+hospitals report to CIHI with
+<a href="https://www.cihi.ca/en/submit-data-and-view-standards/codes-and-classifications">ICD-10-CA
+and CCI</a>. That translation, done by a coder reading the chart, is the
+“coding” step, and Synthea skips it. Finally, the insurer paid
+<code class="language-plaintext highlighter-rouge">3581.0319999999997</code> dollars: money held as binary floating point.
+Never do that in your own code; store cents as integers or use a decimal
+type.</p>
+
+<h1 id="identifiers">Identifiers</h1>
+
+<p>Last stop: who is this patient, according to the record?</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[</span><span class="m">0</span><span class="o">]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span>.identifier<span class="o">[]</span>
+<span class="go">  | [.type.coding[0].code // "-", .system, .value]</span>
+<span class="go">  | @tsv' lindsay.json</span>
+<span class="go">-	https://github.com/synthetichealth/synthea	46976cf7-b0bf-be20-39a5-9f425a52886d</span>
+<span class="go">MR	http://hospital.smarthealthit.org	46976cf7-b0bf-be20-39a5-9f425a52886d</span>
+<span class="go">SS	http://hl7.org/fhir/sid/us-ssn	999-37-5783</span>
+<span class="go">DL	urn:oid:2.16.840.1.113883.4.3.25	S99973582</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[</span><span class="m">0</span><span class="o">]</span>.resource.address<span class="o">[</span><span class="m">0</span><span class="o">]</span>
+<span class="go">  | [.city, .state, .postalCode, .country] | @tsv' lindsay.json</span>
+<span class="go">Worcester	MA	01607	US</span>
+</code></pre></div></div>
+
+<p>Four identifiers, each with a <code class="language-plaintext highlighter-rouge">system</code> that says who issued it.
+The first is Synthea's own id. The <code class="language-plaintext highlighter-rouge">MR</code> one is a medical record
+number issued by a (fictional) hospital. The <code class="language-plaintext highlighter-rouge">SS</code> and
+<code class="language-plaintext highlighter-rouge">DL</code> ones are a US Social Security number and a driver's licence
+number, both generated by Synthea.</p>
+
+<p>Real patients collect identifiers: an MRN from every hospital and clinic
+they've visited, an enterprise ID if those organizations share a master
+patient index, an insurance member ID or a provincial health card number. An
+MRN is unique only within the system that issued it, which is why a
+<a href="https://hl7.org/fhir/R4/patient.html">FHIR Patient</a> identifier
+pairs a <code class="language-plaintext highlighter-rouge">system</code> with the <code class="language-plaintext highlighter-rouge">value</code>. When a clerk can't
+find a patient because of a typo and registers them again, one person becomes
+two records, each holding part of the story. And watch out for assuming one
+MRN per person across hospitals. Week 3 deals with finding and merging
+duplicates.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> the same workflow; the shared identifier is
+  usually the provincial health card number. Each province issues its own
+  (Ontario's is the
+  <a href="https://www.ontario.ca/page/apply-ohip-and-get-health-card">OHIP
+  health card</a>), alongside each facility's MRN.</p>
+</blockquote>
+
+<h2 id="canada-run">A Canadian run</h2>
+
+<p>The synthea-international project publishes configuration for other
+countries: demographics, postal codes, hospitals and payers. The Canadian one
+is a directory of resource files that override the jar's own when they come
+first on the Java classpath. That's why this command uses
+<code class="language-plaintext highlighter-rouge">-cp … App</code> instead of <code class="language-plaintext highlighter-rouge">-jar</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>ls<span class="w"> </span>ca/src/main/resources
+<span class="go">geography</span>
+<span class="go">payers</span>
+<span class="go">providers</span>
+<span class="go">synthea.properties</span>
+<span class="gp">$ </span>java<span class="w"> </span>-cp<span class="w"> </span>ca/src/main/resources:synthea-with-dependencies.jar<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>App<span class="w"> </span>-p<span class="w"> </span><span class="m">5</span><span class="w"> </span>-s<span class="w"> </span><span class="m">42</span><span class="w"> </span>-cs<span class="w"> </span><span class="m">42</span><span class="w"> </span>-r<span class="w"> </span><span class="m">20261031</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--exporter.baseDirectory<span class="o">=</span>./ontario/<span class="w"> </span>Ontario<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-e<span class="w"> </span><span class="s1">' -- '</span><span class="w"> </span>-e<span class="w"> </span>Records
+<span class="go">2 -- Wilfredo622 Fritsch593 (15 y/o M) Haldimand County, Ontario  (20330)</span>
+<span class="go">3 -- Ezekiel373 Walter473 (27 y/o M) Windsor, Ontario  (36663)</span>
+<span class="go">4 -- Shalanda398 Kelsie51 Kris249 (30 y/o F) Toronto, Ontario  (41576)</span>
+<span class="go">5 -- Jona712 Bonnie873 Gutmann970 (67 y/o F) Hamilton, Ontario  (93802)</span>
+<span class="go">1 -- Corie618 Sofia418 Auer97 (91 y/o F) Richmond Hill, Ontario DECEASED (126447)</span>
+<span class="go">1 -- Mellie476 Cuc113 Wintheiser220 (86 y/o F) Richmond Hill, Ontario DECEASED (119777)</span>
+<span class="go">1 -- Yesenia104 Rosella686 Koss676 (88 y/o F) Richmond Hill, Ontario DECEASED (121255)</span>
+<span class="go">1 -- Glenda787 Lynetta635 Schowalter414 (81 y/o F) Richmond Hill, Ontario DECEASED (123702)</span>
+<span class="go">1 -- Linnea167 Pfeffer420 (82 y/o F) Richmond Hill, Ontario DECEASED (113977)</span>
+<span class="go">1 -- Rhona164 Cremin516 (91 y/o F) Richmond Hill, Ontario DECEASED (130426)</span>
+<span class="go">1 -- Kanesha23 Avril120 Sanford861 (101 y/o F) Richmond Hill, Ontario  (144253)</span>
+<span class="go">Records: total=11, alive=5, dead=6</span>
+</code></pre></div></div>
+
+<p>Ontario cities this time, and some familiar first names. This run also
+produced six deceased patients on the way to five living ones; we didn't dig
+into why. What did the configuration change?</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nv">on</span><span class="o">=</span><span class="k">$(</span>ls<span class="w"> </span>ontario/fhir/Shalanda398_*.json<span class="k">)</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[</span><span class="m">0</span><span class="o">]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span>.identifier<span class="o">[]</span>
+<span class="go">  | [.type.coding[0].code // "-", .system, .value]</span>
+<span class="go">  | @tsv' $on</span>
+<span class="go">-	https://github.com/synthetichealth/synthea	46ee9d82-b52c-856d-069b-5064ff052225</span>
+<span class="go">MR	http://hospital.smarthealthit.org	46ee9d82-b52c-856d-069b-5064ff052225</span>
+<span class="go">SS	http://hl7.org/fhir/sid/us-ssn	999-44-2741</span>
+<span class="go">DL	urn:oid:2.16.840.1.113883.4.3.25	S99962205</span>
+<span class="go">PPN	http://hl7.org/fhir/sid/passport-USA	X44936501X</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[</span><span class="m">0</span><span class="o">]</span>.resource.address<span class="o">[</span><span class="m">0</span><span class="o">]</span>
+<span class="go">  | [.city, .state, .postalCode, .country] | @tsv' $on</span>
+<span class="go">Toronto	Ontario	M5T	CA</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="o">(</span>.code<span class="w"> </span>//<span class="w"> </span>.vaccineCode
+<span class="go">  // .medicationCodeableConcept).coding[0].system</span>
+<span class="go">  | select(.)' $on | sort | uniq -c | sort -rn</span>
+<span class="go">    112 http://snomed.info/sct</span>
+<span class="go">     69 http://loinc.org</span>
+<span class="go">     15 http://www.nlm.nih.gov/research/umls/rxnorm</span>
+<span class="go">      8 http://hl7.org/fhir/sid/cvx</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="err">'</span>.entry<span class="o">[]</span>.resource<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">select</span><span class="o">(</span>.resourceType<span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"Claim"</span><span class="o">)</span>
+<span class="go">  | "\(.insurance[0].coverage.display) \(.total.currency)"' \</span>
+<span class="gp">  $</span>on<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c
+<span class="go">     58 Ontario Health Insurance USD</span>
+</code></pre></div></div>
+
+<p>The address is Canadian, with only the first three characters of the
+postal code, and the payer is Ontario Health Insurance. Everything else is
+still American. The configuration localizes where people live and who pays,
+not how they're identified or coded.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> the Ontario run gave Ontario addresses and an
+  Ontario payer, but SSN, US driver's licence and US passport identifiers, no
+  health card number, RxNorm and CVX codes, and claims in USD. For Canadian
+  work, add a health card identifier yourself, with a
+  <code class="language-plaintext highlighter-rouge">system</code> you control, before you build anything on it.</p>
+</blockquote>
+
+<h1 id="nurses-account">Writing it down like a nurse</h1>
+
+<p>Now turn the jq output into something a person can read. Here is a model
+for your build: first the account, in the words a triage nurse might use at
+handover, then the timeline that proves it. Everything in both comes from the
+runs above.</p>
+
+<p><em>A 15-year-old girl came in to the emergency department just before
+noon with cystitis. It had started six days earlier, and she'd had a video
+visit, a clinic visit and a follow-up about it since. We took her history,
+triaged her at 12:10 and did vitals at 12:25; her triage score said she'd
+need one resource. The doctor examined her at 12:30. We started a urinalysis
+at 13:29 and collected the sample at 13:39. Results were back at 13:59:
+nitrites positive, leukocytes one plus. The doctor started antibiotics, and
+she was discharged at 14:09 with a prescription for nitrofurantoin. She was
+out of the department by 14:19.</em></p>
+
+<p>And the timeline. Each row is one line of the jq output, translated:</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Time</th><th>What happened</th><th>FHIR resource.field</th></tr></thead>
+<tbody>
+<tr><td>11:55</td><td>Arrives; registered in the emergency department</td><td><code class="language-plaintext highlighter-rouge">Encounter.period.start</code> (<code class="language-plaintext highlighter-rouge">class</code> <code class="language-plaintext highlighter-rouge">EMER</code>)</td></tr>
+<tr><td>11:55</td><td>History taken</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>11:55</td><td>H&amp;P note (stamped at arrival)</td><td><code class="language-plaintext highlighter-rouge">DocumentReference.date</code></td></tr>
+<tr><td>12:04</td><td>Symptoms discussed</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>12:10</td><td>Triaged</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>12:25</td><td>Vital signs taken</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>12:30</td><td>Triage score and 5 vital signs charted</td><td><code class="language-plaintext highlighter-rouge">Observation.effectiveDateTime</code></td></tr>
+<tr><td>12:30</td><td>Doctor's history and physical</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>13:29</td><td>Urinalysis started</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>13:39</td><td>Urine sample collected</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>13:59</td><td>Urinalysis results (15 values, 1 report)</td><td><code class="language-plaintext highlighter-rouge">Observation.effectiveDateTime</code>, <code class="language-plaintext highlighter-rouge">DiagnosticReport.effectiveDateTime</code></td></tr>
+<tr><td>13:59</td><td>Antibiotic therapy started</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code></td></tr>
+<tr><td>14:09</td><td>Discharged; nitrofurantoin prescribed</td><td><code class="language-plaintext highlighter-rouge">Procedure.performedPeriod.start</code>, <code class="language-plaintext highlighter-rouge">MedicationRequest.authoredOn</code></td></tr>
+<tr><td>14:19</td><td>Leaves; visit closed and billed</td><td><code class="language-plaintext highlighter-rouge">Encounter.period.end</code>, <code class="language-plaintext highlighter-rouge">Claim.created</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Two rows deserve a second look: a note stamped earlier than most of what
+it describes, and results and treatment in the same minute at 13:59.
+Plausible, but check it rather than assume it.</p>
+
+<h1 id="build">Your build this week</h1>
+
+<ol>
+  <li>Generate 10 Synthea patients; pick an emergency or inpatient encounter.
+  Use a different seed or patient from ours.</li>
+  <li>List its resources: Encounter, Conditions, Observations, Procedures,
+  MedicationRequests, Claim.</li>
+  <li>Write a half-page account as a nurse would tell it.</li>
+  <li>Turn it into a timeline linking each event to a FHIR resource and
+  field.</li>
+  <li>Start the glossary; aim for 100 terms by week 6. The
+  <a href="glossary.html">course glossary</a> is a starting point; write your
+  own definitions.</li>
+</ol>
+
+<p>Go further: interview a nurse or registration clerk about one shift. Ask
+what they record, when they record it, and what they do when the system is
+slow. You'll hear about charting after the fact and workarounds no data model
+mentions.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> have it explain clinical terms; check each
+  against MedlinePlus or a similar reference.</p>
+</blockquote>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>A non-engineer can follow your account.</li>
+  <li>Every timestamp points to a FHIR resource and field.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>Who records a lab result, and which FHIR resources hold it? Answer for a
+  real hospital, then check what Synthea fills in for one of your patients'
+  DiagnosticReports and their result Observations.</li>
+  <li>Why do duplicate patient records appear? Name three causes at the
+  registration desk, and say which identifier would have prevented each.</li>
+  <li>Why isn't an encounter's start time the time of everything in it? Find
+  an inpatient encounter in your population and compute the largest gap
+  between <code class="language-plaintext highlighter-rouge">Encounter.period.start</code> and the time of a resource that
+  references it.</li>
+  <li>Modify <code class="language-plaintext highlighter-rouge">timeline.jq</code> so it also prints the
+  <code class="language-plaintext highlighter-rouge">end</code> of each <code class="language-plaintext highlighter-rouge">performedPeriod</code>. Which Procedure in
+  Lindsay's visit is longest?</li>
+  <li>Write a jq filter that finds every reference in a bundle whose target
+  doesn't exist in the bundle. Then write one that flags a Condition whose
+  <code class="language-plaintext highlighter-rouge">encounter</code> ended before the condition's onset. How many does
+  your population have?</li>
+  <li>Using the ADT table, write the sequence of v2 events a hospital would
+  send for a patient who arrives in the emergency department, is admitted to a
+  medical ward, moves to intensive care, and goes home. For each event, which
+  FHIR fields change?</li>
+  <li>Find the ExplanationOfBenefit for one of your encounters and compute
+  what the patient owed. Which fields did you use, and where did floating
+  point get in your way?</li>
+  <li>Canada track: generate five Ontario patients, add a health card
+  identifier to each Patient with a <code class="language-plaintext highlighter-rouge">system</code> under
+  <code class="language-plaintext highlighter-rouge">https://example.org/</code>, and decide what your code should do when a
+  patient has no health card number.</li>
+  <li>Stretch: load your 10 patients into the course HAPI server
+  (<a href="lab-setup.html">lab setup</a>) and rebuild the timeline with FHIR
+  searches (<code class="language-plaintext highlighter-rouge">Observation?encounter=…</code> and friends) instead of jq.
+  What does the server make easier, and what harder?</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://github.com/synthetichealth/synthea/wiki">Synthea wiki</a></li>
+  <li><a href="https://hl7.org/fhir/R4/patient.html">FHIR Patient</a></li>
+  <li><a href="https://medlineplus.gov/">MedlinePlus</a></li>
+  <li><a href="https://hl7.org/fhir/R4/encounter.html">FHIR R4 Encounter (class, status, statusHistory)</a></li>
+  <li><a href="https://hl7.org/fhir/R4/diagnosticreport.html">FHIR R4 DiagnosticReport</a></li>
+  <li><a href="https://hl7.org/fhir/R4/medicationrequest.html">FHIR R4 MedicationRequest</a></li>
+  <li><a href="https://build.fhir.org/ig/HL7/v2-to-fhir/">HL7 v2-to-FHIR mapping guide</a></li>
+  <li><a href="https://github.com/synthetichealth/synthea-international">synthea-international (Canada config in ca/)</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

@@ -1,0 +1,2 @@
+# HL7 v2 segments end in \r; never let git rewrite line endings in the samples
+*.hl7 -text

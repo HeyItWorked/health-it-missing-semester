@@ -1,0 +1,10 @@
+--- bridge.py
++++ bridge.py
+@@ -108,6 +108,7 @@
+ 
+ def process(msg):
+     ctl = field(msg, "MSH.F10")
++    log.debug("%s received %r", ctl, str(msg))  # for INC-1234
+     try:
+         status, location = upsert(to_patient(msg))
+         # an audit failure is an OSError too: no ACK, so it retries

@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 3 of the Health IT Missing Semester: HL7 v2 + patient identity.">
+
+  <title>HL7 v2 + patient identity &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">HL7 v2 + patient identity</h1>
+<h2 class="subtitle">Week 3 · ~10 h</h2>
+
+<p>Most of what happens to a patient in a hospital is announced in a message.
+Registration admits someone, and every downstream system hears about it. A lab
+analyzer finishes a test, and the result travels to the chart. A nurse moves a
+patient to another bed, and pharmacy, the kitchen and billing all update their
+records. For more than three decades, most of those announcements have been
+written in HL7 Version 2, which HL7 International itself calls
+<a href="https://www.hl7.org/implement/standards/product_brief.cfm?product_id=185">“the workhorse of electronic data exchange in the clinical domain”</a>.
+FHIR gets the attention (that's week 4), but if you join an integration team, there is a good chance
+your first ticket is about a v2 interface.</p>
+
+<p>This lecture covers how v2 messages are built, how they travel, what an
+acknowledgment does and doesn't promise, and the hardest part of the whole
+business: knowing which patient a message is about. Along the way we build a
+small bridge that receives ADT (admit, discharge, transfer) messages and keeps
+exactly one FHIR Patient per medical record number, however many times the
+sender repeats itself. Identity mistakes here duplicate patients or merge the
+wrong ones; delivery mistakes lose results. Both reach the bedside.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab: a
+local HAPI FHIR 8.12.0 server in Docker and python-hl7 0.4.5. The outputs are copied
+from those runs. Yours will differ in timestamps, control IDs and server ids.</p>
+
+<h1 id="anatomy-of-a-message">Anatomy of a message</h1>
+
+<p>Here is a complete admission message, the kind a registration system sends
+when a patient is admitted. It is four lines long, sort of:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span>&lt;<span class="w"> </span>adt.hl7
+<span class="go">MSH|^~\&amp;|REGADT|GENHOSP|BRIDGE|LAB|20261031093000||ADT^A01^ADT_A01|MSG00001|T|2.5.1</span>
+<span class="go">EVN|A01|20261031093000</span>
+<span class="go">PID|1||100234^^^GENHOSP^MR||DOE^JANE||19800214|F|||12 MAIN ST^^SPRINGFIELD^IL^62701</span>
+<span class="go">PV1|1|I|4W^401^A</span>
+</code></pre></div></div>
+
+<p>Each line is a <em>segment</em>, and its first three characters say what kind:
+<code class="language-plaintext highlighter-rouge">MSH</code> is the message header, <code class="language-plaintext highlighter-rouge">EVN</code> the event, <code class="language-plaintext highlighter-rouge">PID</code>
+patient identification and <code class="language-plaintext highlighter-rouge">PV1</code> the patient visit. Within a
+segment, <code class="language-plaintext highlighter-rouge">|</code> separates <em>fields</em>, numbered from 1, and people
+refer to them as segment-number: <code class="language-plaintext highlighter-rouge">PID-3</code> is the patient identifier
+list, <code class="language-plaintext highlighter-rouge">PID-5</code> the name, <code class="language-plaintext highlighter-rouge">PID-7</code> the birth date,
+<code class="language-plaintext highlighter-rouge">PID-8</code> administrative sex and <code class="language-plaintext highlighter-rouge">PID-11</code> the address. In
+<code class="language-plaintext highlighter-rouge">PV1</code>, field 2 is the patient class (<code class="language-plaintext highlighter-rouge">I</code> for inpatient) and
+field 3 the assigned location: unit <code class="language-plaintext highlighter-rouge">4W</code>, room <code class="language-plaintext highlighter-rouge">401</code>, bed
+<code class="language-plaintext highlighter-rouge">A</code>.</p>
+
+<p>Fields have structure of their own. <code class="language-plaintext highlighter-rouge">^</code> separates
+<em>components</em>: the name <code class="language-plaintext highlighter-rouge">DOE^JANE</code> is family name, then given
+name, and the identifier <code class="language-plaintext highlighter-rouge">100234^^^GENHOSP^MR</code> is an ID number
+(component 1), an assigning authority (component 4, <code class="language-plaintext highlighter-rouge">GENHOSP</code>) and an
+identifier type (component 5, <code class="language-plaintext highlighter-rouge">MR</code> for medical record number).
+<code class="language-plaintext highlighter-rouge">~</code> separates <em>repetitions</em> of a field, because a patient can
+have several identifiers or several addresses. <code class="language-plaintext highlighter-rouge">&amp;</code> separates
+subcomponents, and <code class="language-plaintext highlighter-rouge">\</code> starts an escape sequence such as
+<code class="language-plaintext highlighter-rouge">\T\</code> for a literal <code class="language-plaintext highlighter-rouge">&amp;</code> or <code class="language-plaintext highlighter-rouge">\F\</code> for a
+literal <code class="language-plaintext highlighter-rouge">|</code>.</p>
+
+<p>Those five characters aren't fixed by the standard: each message declares its
+own. <code class="language-plaintext highlighter-rouge">MSH-1</code> is the field separator, the <code class="language-plaintext highlighter-rouge">|</code> straight after
+<code class="language-plaintext highlighter-rouge">MSH</code>, and <code class="language-plaintext highlighter-rouge">MSH-2</code> is <code class="language-plaintext highlighter-rouge">^~\&amp;</code>: the component,
+repetition, escape and subcomponent characters, in that order. Nearly everyone
+uses the defaults, but a parser that hard-codes them is betting that everyone
+always will.</p>
+
+<p>The rest of <code class="language-plaintext highlighter-rouge">MSH</code> tells the receiver what it is looking at.
+<code class="language-plaintext highlighter-rouge">MSH-3</code> and <code class="language-plaintext highlighter-rouge">MSH-4</code> name the sending application and
+facility, <code class="language-plaintext highlighter-rouge">MSH-5</code> and <code class="language-plaintext highlighter-rouge">MSH-6</code> the receiving ones, and
+<code class="language-plaintext highlighter-rouge">MSH-7</code> says when the message was created. <code class="language-plaintext highlighter-rouge">MSH-9</code> is the
+message type, <code class="language-plaintext highlighter-rouge">MSH-10</code> a control ID the sender uses to match up the
+reply, <code class="language-plaintext highlighter-rouge">MSH-11</code> the processing ID (<code class="language-plaintext highlighter-rouge">P</code> for production,
+<code class="language-plaintext highlighter-rouge">T</code> for training, <code class="language-plaintext highlighter-rouge">D</code> for debugging) and
+<code class="language-plaintext highlighter-rouge">MSH-12</code> the version of the standard, here 2.5.1. Many interfaces
+still run 2.3 or 2.3.1; the structure is the same, but fields were added and
+renamed between versions, so the interface spec names the version you build
+against.</p>
+
+<h2 id="the-carriage-return-trap">The carriage-return trap</h2>
+
+<p>We cheated above by piping the file through <code class="language-plaintext highlighter-rouge">tr</code>. Segments in HL7
+v2 end with a carriage return (<code class="language-plaintext highlighter-rouge">\r</code>, byte <code class="language-plaintext highlighter-rouge">0x0D</code>), not the
+newline (<code class="language-plaintext highlighter-rouge">\n</code>) that Unix tools expect. Look at the raw file:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>wc<span class="w"> </span>-l<span class="w"> </span>adt.hl7
+<span class="go">0 adt.hl7</span>
+<span class="gp">$ </span>od<span class="w"> </span>-c<span class="w"> </span>adt.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-6
+<span class="go">0000000   M   S   H   |   ^   ~   \   &amp;   |   R   E   G   A   D   T   |</span>
+<span class="go">0000020   G   E   N   H   O   S   P   |   B   R   I   D   G   E   |   L</span>
+<span class="go">0000040   A   B   |   2   0   2   6   1   0   3   1   0   9   3   0   0</span>
+<span class="go">0000060   0   |   |   A   D   T   ^   A   0   1   ^   A   D   T   _   A</span>
+<span class="go">0000100   0   1   |   M   S   G   0   0   0   0   1   |   T   |   2   .</span>
+<span class="go">0000120   5   .   1  \r   E   V   N   |   A   0   1   |   2   0   2   6</span>
+</code></pre></div></div>
+
+<p><code class="language-plaintext highlighter-rouge">wc -l</code> counts newlines and finds none, and <code class="language-plaintext highlighter-rouge">od -c</code>
+shows the <code class="language-plaintext highlighter-rouge">\r</code> where the <code class="language-plaintext highlighter-rouge">MSH</code> segment ends. Line-oriented
+tools see one long line, terminals and editors may quietly draw <code class="language-plaintext highlighter-rouge">\r</code>
+as a line break and hide the difference, and Python's <code class="language-plaintext highlighter-rouge">open()</code> is the
+sneakiest of all: in text mode it translates <code class="language-plaintext highlighter-rouge">\r</code> into
+<code class="language-plaintext highlighter-rouge">\n</code> before your code sees the data. We'll trip over that in a
+moment.</p>
+
+<p>Once you know about the trap, shell tools are fine for a quick look. Convert
+the separators, then let awk split on <code class="language-plaintext highlighter-rouge">|</code>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span>&lt;<span class="w"> </span>adt.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span>-F<span class="s1">&#39;|&#39;</span><span class="w"> </span><span class="s1">&#39;$1==&quot;MSH&quot; {print $9}&#39;</span>
+<span class="go">ADT^A01^ADT_A01</span>
+<span class="gp">$ </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span>&lt;<span class="w"> </span>adt.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span>-F<span class="s1">&#39;|&#39;</span><span class="w"> </span><span class="s1">&#39;$1==&quot;PID&quot; {split($6, n, &quot;^&quot;); print n[1] &quot;, &quot; n[2]}&#39;</span>
+<span class="go">DOE, JANE</span>
+</code></pre></div></div>
+
+<p>Look at the numbering. Because <code class="language-plaintext highlighter-rouge">MSH-1</code> <em>is</em> the
+<code class="language-plaintext highlighter-rouge">|</code>, awk's <code class="language-plaintext highlighter-rouge">$9</code> is <code class="language-plaintext highlighter-rouge">MSH-9</code>, but in every other
+segment field <em>n</em> is <code class="language-plaintext highlighter-rouge">$(n+1)</code>, so <code class="language-plaintext highlighter-rouge">PID-5</code> is
+<code class="language-plaintext highlighter-rouge">$6</code>. That off-by-one is the classic bug in hand-written
+parsers.</p>
+
+<h2 id="use-a-parser">Use a parser</h2>
+
+<p>awk is fine for a peek, but splitting on separators by hand eventually gets
+repetitions, escapes or missing trailing fields wrong. Real code should use a
+library: HAPI HL7v2 in Java, python-hl7 in Python, or your integration engine's
+parser. Here is python-hl7 in the REPL:</p>
+
+<div class="language-pycon highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">hl7</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">msg</span> <span class="o">=</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;adt.hl7&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">len</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+<span class="go">1</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">msg</span> <span class="o">=</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;adt.hl7&quot;</span><span class="p">,</span> <span class="n">newline</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">len</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+<span class="go">4</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">msg</span><span class="p">[</span><span class="s2">&quot;MSH.F10&quot;</span><span class="p">],</span> <span class="n">msg</span><span class="p">[</span><span class="s2">&quot;PID.F3.R1.C1&quot;</span><span class="p">],</span> <span class="n">msg</span><span class="p">[</span><span class="s2">&quot;PID.F7&quot;</span><span class="p">]</span>
+<span class="go">(&#39;MSG00001&#39;, &#39;100234&#39;, &#39;19800214&#39;)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">str</span><span class="p">(</span><span class="n">msg</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s2">&quot;PID&quot;</span><span class="p">)[</span><span class="mi">5</span><span class="p">])</span>
+<span class="go">&#39;DOE^JANE&#39;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">msg</span><span class="p">[</span><span class="s2">&quot;PID.F5.R1.C2&quot;</span><span class="p">]</span>
+<span class="go">&#39;JANE&#39;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">on</span> <span class="o">=</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;adt-on.hl7&quot;</span><span class="p">,</span> <span class="n">newline</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">str</span><span class="p">(</span><span class="n">on</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s2">&quot;PID&quot;</span><span class="p">)[</span><span class="mi">3</span><span class="p">])</span>
+<span class="go">&#39;100236^^^GENHOSP^MR~9876543225^^^ON^JHN&#39;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">on</span><span class="p">[</span><span class="s2">&quot;PID.F3.R2.C1&quot;</span><span class="p">],</span> <span class="n">on</span><span class="p">[</span><span class="s2">&quot;PID.F3.R2.C5&quot;</span><span class="p">]</span>
+<span class="go">(&#39;9876543225&#39;, &#39;JHN&#39;)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">amp</span> <span class="o">=</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">&quot;adt-amp.hl7&quot;</span><span class="p">,</span> <span class="n">newline</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">str</span><span class="p">(</span><span class="n">amp</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s2">&quot;PID&quot;</span><span class="p">)[</span><span class="mi">5</span><span class="p">])</span>
+<span class="go">&#39;DOE\\T\\SMITH^JANE&#39;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">amp</span><span class="p">[</span><span class="s2">&quot;PID.F5.R1.C1&quot;</span><span class="p">]</span>
+<span class="go">&#39;DOE&amp;SMITH&#39;</span>
+</code></pre></div></div>
+
+<p>The first attempt walks straight into the trap: <code class="language-plaintext highlighter-rouge">open()</code> turned
+every <code class="language-plaintext highlighter-rouge">\r</code> into <code class="language-plaintext highlighter-rouge">\n</code>, so python-hl7 found one segment
+instead of four. Passing <code class="language-plaintext highlighter-rouge">newline=""</code> keeps the bytes as they are. A
+key like <code class="language-plaintext highlighter-rouge">"PID.F3.R1.C1"</code> reads field 3, repetition 1, component 1.
+The Ontario sample has two repetitions in <code class="language-plaintext highlighter-rouge">PID-3</code>: the hospital MRN
+and a provincial health card number, typed <code class="language-plaintext highlighter-rouge">JHN</code>. And the last sample
+shows why you never compare raw field strings: the sender escaped an ampersand
+as <code class="language-plaintext highlighter-rouge">\T\</code>, and the accessor returns the unescaped value.</p>
+
+<blockquote>
+  <p>Language models are good at explaining a segment field by field. Check what
+  they tell you against the spec page for your version: fields were added and
+  renamed between versions, and a confident answer can describe the wrong
+  one.</p>
+</blockquote>
+
+<h1 id="message-types-and-trigger-events">Message types and trigger events</h1>
+
+<p><code class="language-plaintext highlighter-rouge">MSH-9</code> in our sample is <code class="language-plaintext highlighter-rouge">ADT^A01^ADT_A01</code>: message
+code <code class="language-plaintext highlighter-rouge">ADT</code>, trigger event <code class="language-plaintext highlighter-rouge">A01</code>, and message structure
+<code class="language-plaintext highlighter-rouge">ADT_A01</code>. The trigger event is the real-world thing that happened,
+and a handful of them cover most of what you will see:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">ADT^A01</code>, admit/visit notification: an inpatient was admitted.</li>
+  <li><code class="language-plaintext highlighter-rouge">ADT^A04</code>, register a patient: for example an outpatient or emergency arrival.</li>
+  <li><code class="language-plaintext highlighter-rouge">ADT^A08</code>, update patient information: demographics changed.</li>
+  <li><code class="language-plaintext highlighter-rouge">ADT^A03</code>, discharge/end visit.</li>
+  <li><code class="language-plaintext highlighter-rouge">ADT^A40</code>, merge patient: two records turned out to be one person (more below).</li>
+  <li><code class="language-plaintext highlighter-rouge">ORU^R01</code>, observation results, such as lab values on their way to the chart.</li>
+  <li><code class="language-plaintext highlighter-rouge">VXU^V04</code>, a vaccination record: what public-health immunization registries receive.</li>
+</ul>
+
+<p>Several events share a structure: an <code class="language-plaintext highlighter-rouge">A08</code> is sent with structure
+<code class="language-plaintext highlighter-rouge">ADT_A01</code>, because it carries the same segments. Week 1's encounter
+story is useful here. Each event is something a person did at a desk or a
+bedside, and the messages arrive in roughly the order the work happened. Roughly:
+retries and racing feeds mean an <code class="language-plaintext highlighter-rouge">A08</code> can arrive before the
+<code class="language-plaintext highlighter-rouge">A01</code> it updates, and a receiver must cope (case 6 in the broken set
+below). Process messages one at a time and in order on each connection; most
+feeds depend on it.</p>
+
+<h1 id="getting-messages-across-mllp">Getting messages across: MLLP</h1>
+
+<p>v2 messages usually travel over a plain TCP connection. TCP is a byte stream
+with no idea where one message ends and the next begins, so v2 adds a minimal
+framing layer, the Minimal Lower Layer Protocol (MLLP): a start byte
+<code class="language-plaintext highlighter-rouge">0x0B</code>, the message, then the two bytes <code class="language-plaintext highlighter-rouge">0x1C 0x0D</code>. That
+really is the whole protocol. Port 2575 is the conventional port.</p>
+
+<p>We can watch it on the wire by putting <code class="language-plaintext highlighter-rouge">socat</code> between a sender
+and the listener we build later in this lecture, and asking it to dump every
+byte in hex. The <code class="language-plaintext highlighter-rouge">awk</code> keeps the first four bytes and the last three
+of each frame:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>socat<span class="w"> </span>-x<span class="w"> </span>TCP-LISTEN:2576,reuseaddr<span class="w"> </span>TCP:localhost:2575<span class="w"> </span><span class="m">2</span>&gt;<span class="w"> </span>wire.log<span class="w"> </span><span class="p">&amp;</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2576</span><span class="w"> </span>localhost<span class="w"> </span>&gt;<span class="w"> </span>/dev/null
+<span class="gp">$ </span>awk<span class="w"> </span><span class="s1">&#39;/^[&lt;&gt;]/ {print $1, $4; next} {print $1, $2, $3, $4, &quot;...&quot;, $(NF-2), $(NF-1), $NF}&#39;</span><span class="w"> </span>wire.log
+<span class="go">&gt; length=210</span>
+<span class="go">0b 4d 53 48 ... 41 1c 0d</span>
+<span class="go">&lt; length=111</span>
+<span class="go">0b 4d 53 48 ... 0d 1c 0d</span>
+</code></pre></div></div>
+
+<p>Both frames start with <code class="language-plaintext highlighter-rouge">0b</code> followed by <code class="language-plaintext highlighter-rouge">4d 53 48</code>
+(“MSH”) and end with <code class="language-plaintext highlighter-rouge">1c 0d</code>. The second frame, flowing back, is the
+acknowledgment.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> <code class="language-plaintext highlighter-rouge">mllp_send --loose</code> dropped the file's
+  final <code class="language-plaintext highlighter-rouge">\r</code> before framing it (the frame ends <code class="language-plaintext highlighter-rouge">41 1c 0d</code>:
+  “A”, then the trailer), while the ACK kept it (<code class="language-plaintext highlighter-rouge">0d 1c 0d</code>).
+  Receivers should accept both. Without <code class="language-plaintext highlighter-rouge">--loose</code>,
+  <code class="language-plaintext highlighter-rouge">mllp_send</code> expects a file that is already framed and fails with
+  <code class="language-plaintext highlighter-rouge">MLLPException: buffer not terminated</code>, exit status 1.</p>
+</blockquote>
+
+<p>MLLP has no encryption and no authentication. Interfaces run it inside a VPN
+or a TLS tunnel between known hosts, and that network path belongs in the
+interface spec just as much as the message format does.</p>
+
+<h1 id="acknowledgments">Acknowledgments: what AA actually promises</h1>
+
+<p>Every message gets a reply. In the basic (“original”) acknowledgment mode,
+the receiver sends back an <code class="language-plaintext highlighter-rouge">ACK</code> message whose <code class="language-plaintext highlighter-rouge">MSA</code>
+segment carries a code and echoes the control ID from the sender's
+<code class="language-plaintext highlighter-rouge">MSH-10</code>:</p>
+
+<ul>
+  <li><strong>AA</strong> (application accept): the receiving application processed the message.</li>
+  <li><strong>AE</strong> (application error): it tried, and something in the content was wrong. An <code class="language-plaintext highlighter-rouge">ERR</code> segment should say what and where.</li>
+  <li><strong>AR</strong> (application reject): it refused to process the message at all, for example because <code class="language-plaintext highlighter-rouge">MSH</code> named a processing ID, message type or version it doesn't handle.</li>
+</ul>
+
+<p>The <code class="language-plaintext highlighter-rouge">ERR</code> segment points at the problem with a location such as
+<code class="language-plaintext highlighter-rouge">PID^1^7</code> (segment, sequence, field) and a code from HL7 table 0357,
+such as <code class="language-plaintext highlighter-rouge">101</code> required field missing, <code class="language-plaintext highlighter-rouge">102</code> data type
+error or <code class="language-plaintext highlighter-rouge">205</code> duplicate key identifier. Here is our listener
+answering three messages from the broken set:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>adt-baddob.hl7<span class="w"> </span>adt-nomrn.hl7<span class="w"> </span>adt-prod.hl7<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span><span class="nv">$f</span><span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">&#39;^(MSA|ERR)&#39;</span><span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">MSA|AE|MSG00002</span>
+<span class="go">ERR||PID^1^7|102^Data type error^HL70357|E</span>
+<span class="go">MSA|AE|MSG00003</span>
+<span class="go">ERR||PID^1^3|101^Required field missing^HL70357|E</span>
+<span class="go">MSA|AR|MSG00004</span>
+<span class="go">ERR||MSH^1^11|202^Unsupported processing id^HL70357|E</span>
+</code></pre></div></div>
+
+<p>Now the important part. A sender treats AA as “you have it; I can forget
+it”. If the receiver says AA and then fails to store the message, the message is
+gone and nobody knows. So the rule for this course is: <strong>send AA only after
+the write has committed</strong>. Not when the bytes arrive, not when the message
+parses, but when the patient is safely in the FHIR server.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> OIE's auto-ACK answered AA to an invalid birth
+  date and while its outbound link was down (2 received, 2 errors): AA meant
+  “received”, not “valid” or “delivered”. HAPI's HL7v2 parser rejected the
+  date.</p>
+</blockquote>
+
+<p>Integration engines can usually acknowledge as soon as a message arrives,
+which keeps the sender fast. That is a legitimate design if the engine then
+stores the message durably and retries delivery itself, but it moves the
+guarantee: AA now means “the engine has it”, and the engine's queue becomes the
+thing someone must watch. Know which kind of AA your interface sends, and write
+it down.</p>
+
+<p>Version 2 also defines an “enhanced” mode with two layers: a commit
+acknowledgment (<code class="language-plaintext highlighter-rouge">CA</code>, <code class="language-plaintext highlighter-rouge">CE</code> or <code class="language-plaintext highlighter-rouge">CR</code>) once the
+message is safely stored, and an application acknowledgment later. Many
+interfaces use original mode; the interface spec says which.</p>
+
+<h1 id="delivery-at-least-once">Delivery: at least once, so make writes idempotent</h1>
+
+<p>What should a sender do when no ACK comes back? It can't tell whether the
+message was lost on the way, or processed with the ACK lost on the way back. The
+safe choice is to send it again, so senders keep resending until they get an
+ACK. Delivery is therefore <em>at least once</em>, and you will see
+duplicates: resends after a timeout, a restarted sender replaying its queue, an
+engine failing over to its standby.</p>
+
+<p>Your receiver turns at-least-once delivery into exactly-once
+<em>effects</em> by making the write idempotent: processing the same message
+twice must leave the same state as processing it once. For patients, that means
+keying the write on the identifier instead of creating a new record each time.
+FHIR has exactly the tool for this, a
+<a href="https://hl7.org/fhir/R4/http.html#cond-update">conditional update</a>.
+Compare it with a plain create:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">FHIR</span><span class="o">=</span>http://localhost:8080/fhir<span class="w"> </span><span class="nv">MRN</span><span class="o">=</span>https://genhosp.example.org/mrn
+<span class="gp">$ </span>cat<span class="w"> </span>patient.json
+<span class="go">{&quot;resourceType&quot;: &quot;Patient&quot;, &quot;identifier&quot;: [{&quot;system&quot;: &quot;https://genhosp.example.org/mrn&quot;, &quot;value&quot;: &quot;100900&quot;}], &quot;name&quot;: [{&quot;family&quot;: &quot;ROE&quot;, &quot;given&quot;: [&quot;RICHARD&quot;]}]}</span>
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>i<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">&#39;%{http_code}\n&#39;</span><span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/fhir+json&#39;</span><span class="w"> </span>-d<span class="w"> </span>@patient.json<span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">201</span>
+<span class="go">201</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100900&amp;_summary=count&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total
+<span class="go">2</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s1">&#39;%{http_code}\n&#39;</span><span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100900&quot;</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/fhir+json&#39;</span><span class="w"> </span>-d<span class="w"> </span>@patient.json
+<span class="go">412</span>
+</code></pre></div></div>
+
+<p>Two POSTs, two patients with the same MRN. That is the duplicate-patient bug,
+and it is a safety problem, not a tidiness one: each copy holds part of the
+record, and a clinician reading one can miss an allergy recorded on the other. A
+conditional PUT says “update the patient with this identifier, or create one if
+there is none”. Once duplicates exist, it refuses to guess and answers
+<code class="language-plaintext highlighter-rouge">412 Precondition Failed</code>. A person has to sort that out.</p>
+
+<p>Why not deduplicate on <code class="language-plaintext highlighter-rouge">MSH-10</code> instead? Control IDs are only
+unique per sender, a sender can reuse them after a restart, and the same facts
+can arrive again in a new message with a new control ID (case 5 below). Use
+<code class="language-plaintext highlighter-rouge">MSH-10</code> to match ACKs and to trace a message through your logs; use
+the patient's identifier to decide what to write.</p>
+
+<h1 id="patient-identity">Patient identity</h1>
+
+<p>The identifier in <code class="language-plaintext highlighter-rouge">PID-3</code> is a medical record number: unique within
+<em>one</em> facility's registration system and meaningless anywhere else. MRN
+100234 at General Hospital and 100234 at the clinic down the road are different
+people. That is why the identifier carries an assigning authority
+(<code class="language-plaintext highlighter-rouge">GENHOSP</code>), and why a FHIR identifier is always a <code class="language-plaintext highlighter-rouge">system</code>
+plus a <code class="language-plaintext highlighter-rouge">value</code>. Our bridge maps each assigning authority it knows to
+a system URI and rejects messages from one it doesn't.</p>
+
+<p>One person usually has many MRNs: one per facility, plus whatever the lab,
+the pharmacy and the clinic assigned. Health systems tie them together with an
+enterprise master patient index (EMPI), which links records it believes belong
+to the same person under an enterprise ID. Between organizations, IHE's PIX
+profile (Patient Identifier Cross-referencing) does the same job, and PDQ
+(Patient Demographics Query) lets a system find a patient by demographics.</p>
+
+<p>Never match patients on name and birth date alone. Twins share a birth date,
+common names collide, and typos and name changes split one person into two.
+Matching is the EMPI's job, with people reviewing the uncertain cases. An
+interface trusts the identifiers it is given and fails loudly when they are
+missing, which is what the AE for case 3 does.</p>
+
+<p>When registration discovers that two records are the same person, it merges
+them and sends <code class="language-plaintext highlighter-rouge">ADT^A40</code>: <code class="language-plaintext highlighter-rouge">PID</code> carries the surviving
+identifier and an <code class="language-plaintext highlighter-rouge">MRG</code> segment carries the one being retired. Don't
+delete the retired record, because other systems may still point at it, and
+merges are sometimes reversed. In FHIR, set it to <code class="language-plaintext highlighter-rouge">active: false</code> and
+link it to the survivor with a <code class="language-plaintext highlighter-rouge">link</code> of type
+<code class="language-plaintext highlighter-rouge">replaced-by</code>.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> the same workflow; the identifier shared across
+  organizations is usually the provincial health card number, alongside each
+  facility's MRN. In v2 it typically arrives as another repetition of
+  <code class="language-plaintext highlighter-rouge">PID-3</code>, typed <code class="language-plaintext highlighter-rouge">JHN</code>, like the Ontario sample above.
+  Health card rules differ by province, so the interface spec says which
+  identifier to key on.</p>
+</blockquote>
+
+<h1 id="building-the-bridge">Building the bridge</h1>
+
+<p>Now we have the pieces. The bridge listens for MLLP, parses each message,
+checks the fields it needs, maps <code class="language-plaintext highlighter-rouge">PID</code> to a FHIR Patient, upserts it
+with a conditional PUT, and only then sends AA. A bad message gets AE or AR with
+an <code class="language-plaintext highlighter-rouge">ERR</code> segment, and nothing is written. If the FHIR server can't be
+reached, the bridge sends no ACK at all and closes the connection, so the sender
+keeps the message and tries again. The heart of it is the part that decides
+what to answer:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">process</span><span class="p">(</span><span class="n">msg</span><span class="p">):</span>
+    <span class="n">ctl</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">msg</span><span class="p">,</span> <span class="s2">&quot;MSH.F10&quot;</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">status</span><span class="p">,</span> <span class="n">location</span> <span class="o">=</span> <span class="n">upsert</span><span class="p">(</span><span class="n">to_patient</span><span class="p">(</span><span class="n">msg</span><span class="p">))</span>
+    <span class="k">except</span> <span class="n">Reject</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2"> </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2"> at </span><span class="si">%s</span><span class="s2">, nothing written&quot;</span><span class="p">,</span>
+                    <span class="n">ctl</span><span class="p">,</span> <span class="n">e</span><span class="o">.</span><span class="n">code</span><span class="p">,</span> <span class="n">e</span><span class="o">.</span><span class="n">why</span><span class="p">,</span> <span class="n">e</span><span class="o">.</span><span class="n">where</span><span class="p">)</span>
+        <span class="n">ack</span> <span class="o">=</span> <span class="n">msg</span><span class="o">.</span><span class="n">create_ack</span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">code</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">ack</span><span class="si">}</span><span class="s2">ERR||</span><span class="si">{</span><span class="n">e</span><span class="o">.</span><span class="n">where</span><span class="si">}</span><span class="s2">|</span><span class="si">{</span><span class="n">e</span><span class="o">.</span><span class="n">why</span><span class="si">}</span><span class="s2">|E</span><span class="se">\r</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>  <span class="c1"># FHIR down: no ACK, so it retries</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2"> write failed (</span><span class="si">%s</span><span class="s2">), no ACK sent&quot;</span><span class="p">,</span>
+                  <span class="n">ctl</span><span class="p">,</span> <span class="n">e</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">None</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2"> AA after HTTP </span><span class="si">%s</span><span class="s2"> </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">ctl</span><span class="p">,</span> <span class="n">status</span><span class="p">,</span> <span class="n">location</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">msg</span><span class="o">.</span><span class="n">create_ack</span><span class="p">(</span><span class="s2">&quot;AA&quot;</span><span class="p">)</span>
+
+
+<span class="k">async</span> <span class="k">def</span> <span class="nf">handle</span><span class="p">(</span><span class="n">reader</span><span class="p">,</span> <span class="n">writer</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">while</span> <span class="ow">not</span> <span class="n">writer</span><span class="o">.</span><span class="n">is_closing</span><span class="p">():</span>
+            <span class="c1"># one message at a time keeps the feed in order</span>
+            <span class="n">ack</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="k">await</span> <span class="n">reader</span><span class="o">.</span><span class="n">readmessage</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">ack</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">break</span>
+            <span class="n">writer</span><span class="o">.</span><span class="n">writemessage</span><span class="p">(</span><span class="n">ack</span><span class="p">)</span>
+            <span class="k">await</span> <span class="n">writer</span><span class="o">.</span><span class="n">drain</span><span class="p">()</span>
+    <span class="k">except</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">IncompleteReadError</span><span class="p">:</span>
+        <span class="k">pass</span>  <span class="c1"># the sender hung up</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">writer</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</code></pre></div></div>
+
+<p>The mapping and validation live in <code class="language-plaintext highlighter-rouge">to_patient</code>, and the write in
+<code class="language-plaintext highlighter-rouge">upsert</code>, which turns a <code class="language-plaintext highlighter-rouge">412</code> into AE 205.</p>
+
+<p>Download <a href="static/files/week-3/bridge.py">bridge.py</a> (138 lines) and the sample
+messages used on this page: <a href="static/files/week-3/patient.json">patient.json</a>, <a href="static/files/week-3/adt.hl7">adt.hl7</a>, <a href="static/files/week-3/adt-on.hl7">adt-on.hl7</a>, <a href="static/files/week-3/adt-amp.hl7">adt-amp.hl7</a>, <a href="static/files/week-3/adt-baddob.hl7">adt-baddob.hl7</a>, <a href="static/files/week-3/adt-nomrn.hl7">adt-nomrn.hl7</a>, <a href="static/files/week-3/adt-prod.hl7">adt-prod.hl7</a>, <a href="static/files/week-3/adt-dupe.hl7">adt-dupe.hl7</a>, <a href="static/files/week-3/adt-newctl.hl7">adt-newctl.hl7</a>, <a href="static/files/week-3/adt-a08-first.hl7">adt-a08-first.hl7</a>, <a href="static/files/week-3/adt-a01-late.hl7">adt-a01-late.hl7</a>, <a href="static/files/week-3/adt-zseg.hl7">adt-zseg.hl7</a>.</p>
+
+<p>Start it in one terminal:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>python3<span class="w"> </span>bridge.py
+<span class="go">listening for MLLP on port 2575</span>
+</code></pre></div></div>
+
+<p>and send the admission from another:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span>
+<span class="go">MSH|^~\&amp;|BRIDGE|LAB|REGADT|GENHOSP|20261031213954||ACK^A01^ACK|6304213954392730KOHI|T|2.5.1</span>
+<span class="go">MSA|AA|MSG00001</span>
+<span class="go"></span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100234&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.total, .entry[0].resource.name, .entry[0].resource.meta.versionId&#39;</span>
+<span class="go">1</span>
+<span class="go">[</span>
+<span class="go">  {</span>
+<span class="go">    &quot;family&quot;: &quot;DOE&quot;,</span>
+<span class="go">    &quot;given&quot;: [</span>
+<span class="go">      &quot;JANE&quot;</span>
+<span class="go">    ]</span>
+<span class="go">  }</span>
+<span class="go">]</span>
+<span class="go">&quot;1&quot;</span>
+</code></pre></div></div>
+
+<p>The ACK echoes our control ID in <code class="language-plaintext highlighter-rouge">MSA-2</code>, and the FHIR server has
+one Jane Doe. The bridge's terminal shows that the write (HTTP 201, created)
+happened before the AA:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>MSG00001 AA after HTTP 201 http://localhost:8080/fhir/Patient/1002/_history/1
+</code></pre></div></div>
+
+<p>Now behave like a sender that never saw the ACK, and send it three more
+times:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="k">for</span><span class="w"> </span>i<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA<span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">MSA|AA|MSG00001</span>
+<span class="go">MSA|AA|MSG00001</span>
+<span class="go">MSA|AA|MSG00001</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100234&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.total, .entry[0].resource.meta.versionId&#39;</span>
+<span class="go">1</span>
+<span class="go">&quot;1&quot;</span>
+</code></pre></div></div>
+
+<p>In the bridge's terminal:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>MSG00001 AA after HTTP 200 http://localhost:8080/fhir/Patient/1002/_history/1
+MSG00001 AA after HTTP 200 http://localhost:8080/fhir/Patient/1002/_history/1
+MSG00001 AA after HTTP 200 http://localhost:8080/fhir/Patient/1002/_history/1
+</code></pre></div></div>
+
+<p>Still one patient. The conditional PUT found the existing record and answered
+200 instead of 201, and HAPI noticed that nothing had changed and didn't even
+create a new version. Remember the duplicate MRN our two POSTs left behind? A
+message for that patient now gets an AE instead of a guess:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt-dupe.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s1">&#39;^(MSA|ERR)&#39;</span>
+<span class="go">MSA|AE|MSG00007</span>
+<span class="go">ERR||PID^1^3|205^Duplicate key identifier^HL70357|E</span>
+</code></pre></div></div>
+
+<p>The escaped ampersand is stored unescaped:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt-amp.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA
+<span class="go">MSA|AA|MSG00005</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100235&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.entry[0].resource.name[0].family&#39;</span>
+<span class="go">&quot;DOE&amp;SMITH&quot;</span>
+</code></pre></div></div>
+
+<p>Look at what the bridge logs: control IDs, ACK codes and server URLs. Never
+names, birth dates or MRNs. Logs get copied into tickets and chat, and week 5
+adds the test that proves no identifier ever reaches them (case 10).</p>
+
+<h2 id="when-the-fhir-server-is-down">When the FHIR server is down</h2>
+
+<p>The interesting failure is the one in the middle: the message is fine, but we
+can't store it. Freeze the FHIR server, send, then thaw it and send again:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>pause<span class="w"> </span>hapi
+<span class="go">hapi</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;exit status: </span><span class="si">${</span><span class="nv">PIPESTATUS</span><span class="p">[0]</span><span class="si">}</span><span class="s2">&quot;</span>
+
+<span class="go">exit status: 0</span>
+<span class="gp">$ </span>docker<span class="w"> </span>unpause<span class="w"> </span>hapi
+<span class="go">hapi</span>
+<span class="gp">$ </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA
+<span class="go">MSA|AA|MSG00001</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|100234&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.total, .entry[0].resource.meta.versionId&#39;</span>
+<span class="go">1</span>
+<span class="go">&quot;1&quot;</span>
+</code></pre></div></div>
+
+<p>In the bridge's terminal:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>MSG00001 write failed (timed out), no ACK sent
+MSG00001 AA after HTTP 200 http://localhost:8080/fhir/Patient/1002/_history/1
+</code></pre></div></div>
+
+<p>With the server frozen, the bridge's HTTP call timed out after 10 seconds, it
+logged the failure, and it closed the connection without an ACK. Once the server
+was back, the resend went through, and there is still exactly one patient,
+still at version 1. Note what <code class="language-plaintext highlighter-rouge">mllp_send</code> did, though: with no ACK,
+it printed nothing and exited with status 0. A real sender must treat a missing
+ACK as a failure and retry. Check what yours does before you trust its exit
+code.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> we froze the server with <code class="language-plaintext highlighter-rouge">docker pause</code>
+  because stopping and restarting this HAPI image lost its data: the database
+  lives inside the container. Your lab's FHIR server is disposable; production
+  ones are not.</p>
+</blockquote>
+
+<h1 id="integration-engines">Integration engines</h1>
+
+<p>Few teams run hand-written listeners like ours in production. Hospitals run
+an integration engine, such as Open Integration Engine (the open-source fork of
+Mirth Connect), InterSystems HealthShare Health Connect or Rhapsody. The engine
+receives each feed once and routes it to every system that needs it, with
+transformers, filters, queues, retries, monitoring and alerting built in. In OIE
+our bridge would be one channel: an MLLP listener as the source, a JavaScript
+transformer for the <code class="language-plaintext highlighter-rouge">PID</code> mapping, and an HTTP sender as the
+destination.</p>
+
+<p>An engine changes who writes the code, not what has to be true: nothing is
+acknowledged before it's safe, duplicates don't become duplicate patients, and
+broken messages land somewhere a person will look. Week 6 deploys an OIE
+channel. This week, build the bridge yourself, so that you know what the
+engine's settings mean.</p>
+
+<h1 id="the-broken-message-set">The broken message set</h1>
+
+<p>Real feeds are messier than any sample. Keep these as files in your repo, each
+with its expected result, and run them in CI:</p>
+
+<div class="table-wrap">
+<table><thead><tr><th>#</th><th>Broken case</th><th>Expected result</th></tr></thead><tbody>
+<tr><td>1</td><td>Segments separated by <code class="language-plaintext highlighter-rouge">\n</code> instead of <code class="language-plaintext highlighter-rouge">\r</code></td><td>One rule (normalize or reject), applied and logged consistently</td></tr>
+<tr><td>2</td><td>PID-7 birth date <code class="language-plaintext highlighter-rouge">NOT_A_DATE</code></td><td>AE with an ERR segment pointing at PID-7</td></tr>
+<tr><td>3</td><td>PID-3 MRN missing</td><td>AE: there is nothing to upsert on</td></tr>
+<tr><td>4</td><td>Exact resend (same MSH-10)</td><td>AA again; still one patient</td></tr>
+<tr><td>5</td><td>Resend with a new MSH-10</td><td>Still one patient (conditional PUT)</td></tr>
+<tr><td>6</td><td>A08 update arrives before its A01</td><td>One patient, no error</td></tr>
+<tr><td>7</td><td>Name with an escaped ampersand (<code class="language-plaintext highlighter-rouge">\T\</code>)</td><td>Stored as “&amp;”, not “\T\”</td></tr>
+<tr><td>8</td><td>Unknown Z-segment (ZPI)</td><td>Ignored; still AA</td></tr>
+<tr><td>9</td><td>MSH-11 = P sent to a TEST listener</td><td>AR, logged, nothing written</td></tr>
+<tr><td>10</td><td>Canary identifiers in PID</td><td>Never appear in any log</td></tr></tbody></table>
+</div>
+
+<p>Each case encodes a decision, and case 1 is yours to make: normalize
+<code class="language-plaintext highlighter-rouge">\n</code> to <code class="language-plaintext highlighter-rouge">\r</code> or reject, but do the same thing every time
+and log it. You need your own sender for case 1, because <code class="language-plaintext highlighter-rouge">mllp_send
+--loose</code> rewrites line endings before framing. Our bridge gives cases 2, 3
+and 9 the expected answers above, and 4 and 7 as well.</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>adt-newctl.hl7<span class="w"> </span>adt-a08-first.hl7<span class="w"> </span>adt-a01-late.hl7<span class="w"> </span>adt-zseg.hl7<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span><span class="nv">$f</span><span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">&#39;\r&#39;</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA<span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">MSA|AA|MSG00099</span>
+<span class="go">MSA|AA|MSG00100</span>
+<span class="go">MSA|AA|MSG00101</span>
+<span class="go">MSA|AA|MSG00102</span>
+<span class="gp">$ </span><span class="k">for</span><span class="w"> </span>m<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">100234</span><span class="w"> </span><span class="m">100240</span><span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$FHIR</span><span class="s2">/Patient?identifier=</span><span class="nv">$MRN</span><span class="s2">|</span><span class="nv">$m</span><span class="s2">&amp;_summary=count&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.total<span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">1</span>
+<span class="go">1</span>
+</code></pre></div></div>
+
+<p>That covers cases 5, 6 and 8: a resend with a new control ID, an
+<code class="language-plaintext highlighter-rouge">A08</code> arriving before its <code class="language-plaintext highlighter-rouge">A01</code>, and an unknown
+<code class="language-plaintext highlighter-rouge">ZPI</code> segment. Each patient still exists exactly once.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> have it generate more broken cases; decide
+  each expected result before you run it.</p>
+</blockquote>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>Every broken case gets its expected result.</li>
+  <li>Resends stay one patient; an A40 leaves one active record.</li>
+  <li>Killing the listener mid-feed loses nothing.</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>Why doesn't an AA prove the message was stored? Find the setting in an
+  integration engine that decides when it sends AA, and say what AA means under
+  each choice.</li>
+  <li>What breaks if you split a raw HL7 file on <code class="language-plaintext highlighter-rouge">\n</code>? Show it twice:
+  once with a shell tool, once with Python's <code class="language-plaintext highlighter-rouge">open()</code>.</li>
+  <li>Why is <code class="language-plaintext highlighter-rouge">MSH-10</code> alone not enough to detect a resend? Give two
+  situations from this lecture where it fails.</li>
+  <li>Write a one-liner that counts segments by type in a raw HL7 file (hint:
+  <code class="language-plaintext highlighter-rouge">tr</code>, <code class="language-plaintext highlighter-rouge">cut</code>, <code class="language-plaintext highlighter-rouge">sort</code>, <code class="language-plaintext highlighter-rouge">uniq -c</code>).
+  Then count message types (<code class="language-plaintext highlighter-rouge">MSH-9</code>) in a file that holds many
+  messages.</li>
+  <li>Turn the broken message set into files plus an expected-results list, and
+  write a script that sends each one and checks the ACK code. Make CI fail on
+  any mismatch.</li>
+  <li>Implement <code class="language-plaintext highlighter-rouge">A40</code>: keep the survivor active, set the other record
+  to <code class="language-plaintext highlighter-rouge">active=false</code> and link it with <code class="language-plaintext highlighter-rouge">replaced-by</code>. Done
+  when an <code class="language-plaintext highlighter-rouge">A40</code> leaves exactly one active record. What should happen
+  if the <code class="language-plaintext highlighter-rouge">A40</code> names a record you never received?</li>
+  <li>Kill test: send 200 messages with a sender that retries until it gets an
+  ACK, and <code class="language-plaintext highlighter-rouge">kill -9</code> the bridge in the middle of the feed. Restart it.
+  Do you have exactly 200 patients? Explain why, or why not.</li>
+  <li>Canada track: map the <code class="language-plaintext highlighter-rouge">JHN</code> repetition of <code class="language-plaintext highlighter-rouge">PID-3</code> to
+  a second FHIR identifier. Which identifier should the conditional PUT key on,
+  and what happens when a patient's health card is replaced?</li>
+  <li>Stretch: accept a <code class="language-plaintext highlighter-rouge">VXU^V04</code> immunization message and write a
+  FHIR Immunization. Public-health registries publish their own guides; in the
+  US, start with CDC's immunization guide and NIST's test tools.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://python-hl7.readthedocs.io/">python-hl7 documentation</a></li>
+  <li><a href="https://github.com/OpenIntegrationEngine/engine">Open Integration Engine</a></li>
+  <li><a href="https://profiles.ihe.net/ITI/">IHE IT Infrastructure profiles (PIX, PDQ)</a></li>
+  <li><a href="https://hl7.org/fhir/R4/http.html#cond-update">FHIR R4 RESTful API: conditional update</a></li>
+  <li><a href="https://www.hl7.eu/HL7v2x/v25/hl7v25tab0357.htm">HL7 table 0357, message error condition codes</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

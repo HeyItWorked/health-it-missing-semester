@@ -1,0 +1,20 @@
+# .github/workflows/validate.yml (not run on GitHub for this page)
+name: validate
+on: [push, pull_request]
+jobs:
+  fhir:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "21"}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install hl7
+      - name: Bridge output for every sample message
+        run: python3 make-patients.py adt*.hl7
+      - name: Get the validator (pinned)
+        run: >
+          curl -sSLo validator_cli.jar https://github.com/hapifhir/org.hl7.fhir.core/releases/download/7.0.3/validator_cli.jar
+      - name: Validate (fails the job on any error)
+        run: ./ci-validate.sh out/*.json

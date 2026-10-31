@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="utf-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Week 5 of the Health IT Missing Semester: Privacy + AI.">
+
+  <title>Privacy + AI &middot; Health IT Missing Semester</title>
+
+  <link rel="stylesheet" href="static/css/main.css">
+  <link rel="stylesheet" href="static/css/syntax.css">
+  <link rel="stylesheet" href="static/css/health-it.css">
+  <script defer src="static/js/sidenotes.js"></script>
+</head>
+
+
+  <body>
+
+    <div id="nav-bg">
+  <nav id="top-nav">
+    <a href="index.html" id="logo">./health-it-missing-semester</a>
+    <input type="checkbox" id="menu-icon">
+    <label class="menu-label" for="menu-icon"></label>
+    <div class="trigger">
+      <div class="trigger-child">
+        <span class="nav-link"><a href="weeks.html">weeks</a></span>
+        <span class="nav-link"><a href="reference.html">reference</a></span>
+        <span class="nav-link"><a href="about.html">about</a></span>
+      </div>
+    </div>
+  </nav>
+</div>
+
+
+    <div id="content">
+    <h1 class="title">Privacy + AI</h1>
+<h2 class="subtitle">Week 5 · ~10 h</h2>
+
+<p>A leaked log line can be a reportable breach, and AI tools are a new way to
+leak. Privacy has to live in your code, logs and habits. Picture an ordinary
+morning: a message failed overnight, so someone pastes it into the ticket,
+commits it as a test fixture, and asks a chat assistant about the stack trace.
+Nobody meant harm, and the patient's name, birth date, address and MRN now live
+in three new places that were never designed to hold them.</p>
+
+<p>Patients tell clinicians things they tell no one else. When the record
+escapes, the harm is concrete: a diagnosis seen by an employer, an address found
+by an abusive ex-partner. The systems you build decide how many copies of that
+information exist, who can read them, and whether anyone can tell who did.</p>
+
+<p>This lecture covers what counts as health information, minimum necessary,
+audit logs and snooping, leak paths, transport security for HL7 v2, breach duties
+and de-identification. We add an audit log to the week-3 bridge, write canary
+tests that fail CI when identifiers escape, break a naive MRN pseudonym in half
+a second, and finish with rules for AI coding tools.</p>
+
+<p>Every command on this page was run on 31 Oct 2026 against the course lab: a
+local HAPI FHIR 8.12.0 server in Docker, python-hl7 0.4.5, pytest 9.2.0, socat
+1.8.0.0, OpenSSL 3.0.13, git 2.43.0 and jq 1.7. The outputs are copied from
+those runs. Yours will differ in
+timestamps, keys, hashes and server ids. All patient data on this page is
+made up.</p>
+
+<h1 id="what-counts-as-phi">What counts as PHI</h1>
+
+<p>PHI is protected (US) or personal (Canada) health information, including in
+logs, screenshots and test data. In the US the term comes from HIPAA: health
+information that identifies a person, held by a covered entity (a provider, a
+health plan, a clearinghouse) or by a business associate working for one. Ontario's
+PHIPA says <em>personal</em> health information, and the other provinces have
+their own acts and their own definitions. The details differ; the engineering
+consequence doesn't. If a piece of data says something about someone's health or
+care and can be tied back to them, treat it as PHI wherever it ends up.</p>
+
+<p>“Wherever it ends up” is the part engineers miss. The rules don't care whether
+the data sits in the EHR's database or in <code class="language-plaintext highlighter-rouge">/var/log</code>, a CI artifact, a
+ticket attachment or a screenshot. An ADT message is PHI from first byte to last:
+name, birth date, MRN, address, even the bed (<code class="language-plaintext highlighter-rouge">4W^401^A</code> says this person
+was an inpatient on that unit that day). A resource id like
+<code class="language-plaintext highlighter-rouge">Patient/1000</code> says much less, which is why we log ids, not names.</p>
+
+<p>Test data counts too, which is why this course uses only synthetic patients.
+For privacy testing we go one step further and use <em>canaries</em>: identifiers
+so obviously fake and so distinctive that if one appears anywhere it shouldn't,
+a plain substring search will find it. Here is our canary admission. Every
+identifying field of <code class="language-plaintext highlighter-rouge">PID</code> is filled, including the ones people
+forget:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>canary.hl7
+<span class="go">MSH|^~\&amp;|REGADT|GENHOSP|BRIDGE|LAB|20261031093000||ADT^A01^ADT_A01|MSG00501|T|2.5.1</span>
+<span class="go">EVN|A01|20261031093000</span>
+<span class="go">PID|1||987650^^^GENHOSP^MR||ZZCANARY^TWEETY|ZZMAIDEN|19610704|F|||1 CANARY LANE^^SPRINGFIELD^IL^62701||555-0142|||||A5550142|999-55-0142|D5550142^IL^20300101</span>
+<span class="go">PV1|1|I|4W^401^A</span>
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">PSEUDONYM_KEY</span><span class="o">=</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span>
+<span class="gp">$ </span>python3<span class="w"> </span>redact.py<span class="w"> </span>allowlist<span class="w"> </span>canary.hl7
+<span class="go">PID|1||9d37895e0d23fc92^^^GENHOSP^MR||||1961|F||||||||||||</span>
+<span class="gp">$ </span>python3<span class="w"> </span>redact.py<span class="w"> </span>blocklist<span class="w"> </span>canary.hl7
+<span class="go">PID|1||9d37895e0d23fc92^^^GENHOSP^MR||||1961|F||||||||||||D5550142^IL^20300101</span>
+</code></pre></div></div>
+
+<p>Field by field: <code class="language-plaintext highlighter-rouge">PID-3</code> MRN 987650, <code class="language-plaintext highlighter-rouge">PID-5</code> name,
+<code class="language-plaintext highlighter-rouge">PID-6</code> mother's maiden name, <code class="language-plaintext highlighter-rouge">PID-7</code> birth date,
+<code class="language-plaintext highlighter-rouge">PID-11</code> address, <code class="language-plaintext highlighter-rouge">PID-13</code> home phone (a 555-01xx number),
+<code class="language-plaintext highlighter-rouge">PID-18</code> account number, <code class="language-plaintext highlighter-rouge">PID-19</code> social security number,
+and <code class="language-plaintext highlighter-rouge">PID-20</code> driver's licence number. The two <code class="language-plaintext highlighter-rouge">redact.py</code>
+lines at the end are this week's first bug; we'll come back to them.</p>
+
+<blockquote>
+  <p><strong>Canada:</strong> PHIPA, HIA and the other provincial acts; Quebec's
+  Law 5; OCAP® for First Nations data.</p>
+</blockquote>
+
+<h1 id="minimum-necessary">Minimum necessary</h1>
+
+<p>The minimum-necessary rule says: use, disclose and request only the
+health information needed for the job at hand. In HIPAA it's
+<a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-E/section-164.502">45 CFR 164.502(b)</a>:
+“reasonable efforts to limit protected health information to the minimum necessary
+to accomplish the intended purpose”. It doesn't apply to disclosures to a provider
+for treatment, because a clinician treating you may need anything in the chart.
+It does apply to the reports, extracts and feeds that engineers build all day.</p>
+
+<p>For an interface, minimum necessary is a mapping decision. The week-3 bridge
+receives a full <code class="language-plaintext highlighter-rouge">PID</code> segment, address included, and maps only what
+the downstream system needs: identifier, name, sex and birth date. The address is
+dropped on the floor, and the FHIR server never has it:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span>localhost:8080/fhir/Patient/1001<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'del(.meta)'</span>
+<span class="go">{"resourceType":"Patient","id":"1001","identifier":[{"system":"https://genhosp.example.org/mrn","value":"100236"}],"active":true,"name":[{"family":"TREMBLAY","given":["LUC"]}],"gender":"male","birthDate":"1980-02-14"}</span>
+<span class="gp">$ </span>curl<span class="w"> </span>-s<span class="w"> </span><span class="s1">'localhost:8080/fhir/Patient?_elements=gender,birthDate'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">'.entry[].resource | {id, gender, birthDate}'</span>
+<span class="go">{"id":"1000","gender":"female","birthDate":"1980-02-14"}</span>
+<span class="go">{"id":"1001","gender":"male","birthDate":"1980-02-14"}</span>
+<span class="go">{"id":"1002","gender":"female","birthDate":"1980-02-14"}</span>
+</code></pre></div></div>
+
+<p>The second command is a report that needs only sex and birth date, so it asks
+for only those with FHIR's <code class="language-plaintext highlighter-rouge">_elements</code> parameter, and names never
+travel to the reporting job. Every field you don't copy is a field you never have
+to protect, purge or explain.</p>
+
+<h1 id="audit-logs-and-snooping">Audit logs and snooping</h1>
+
+<p>Access control decides who <em>can</em> open a chart, and in a hospital that's
+a lot of people: anyone who might treat you tonight must be able to open your
+chart without asking. So access control can't stop a nurse on another ward from
+reading a celebrity's chart. Snooping is a violation even with valid access: the
+question isn't “could they?” but “did they have a reason?”</p>
+
+<p>The control for that is the audit log. HIPAA's Security Rule requires
+<a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.312">audit controls</a>,
+mechanisms “that record and examine activity in information systems that contain
+or use electronic protected health information”. We build an audit log of every
+patient write: who, what, when, why. Here it is in the week-3 bridge:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span><span class="w"> </span><span class="nf">audit</span><span class="p">(</span><span class="n">who</span><span class="p">,</span> <span class="n">action</span><span class="p">,</span> <span class="n">ref</span><span class="p">,</span> <span class="n">why</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Append who, what, when, why as one JSON line. No PHI."""</span>
+    <span class="n">now</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">datetime</span><span class="o">.</span><span class="n">timezone</span><span class="o">.</span><span class="n">utc</span><span class="p">)</span>
+    <span class="n">entry</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"when"</span><span class="p">:</span> <span class="n">now</span><span class="o">.</span><span class="n">isoformat</span><span class="p">(</span><span class="n">timespec</span><span class="o">=</span><span class="s2">"seconds"</span><span class="p">),</span>
+             <span class="s2">"who"</span><span class="p">:</span> <span class="n">who</span><span class="p">,</span> <span class="s2">"action"</span><span class="p">:</span> <span class="n">action</span><span class="p">,</span> <span class="s2">"patient"</span><span class="p">:</span> <span class="n">ref</span><span class="p">,</span>
+             <span class="s2">"why"</span><span class="p">:</span> <span class="n">why</span><span class="p">}</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">AUDIT</span><span class="p">,</span> <span class="s2">"a"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">entry</span><span class="p">)</span> <span class="o">+</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="c1"># in process(), after the write, before the AA:</span>
+<span class="c1"># an audit failure is an OSError too: no ACK, so it retries</span>
+<span class="n">audit</span><span class="p">(</span><span class="s2">"svc-adt-bridge"</span><span class="p">,</span>
+      <span class="s2">"create"</span> <span class="k">if</span> <span class="n">status</span> <span class="o">==</span> <span class="mi">201</span> <span class="k">else</span> <span class="s2">"update"</span><span class="p">,</span>
+      <span class="s2">"/"</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">location</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"/"</span><span class="p">)[</span><span class="o">-</span><span class="mi">4</span><span class="p">:</span><span class="o">-</span><span class="mi">2</span><span class="p">]),</span>
+      <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">msg</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s1">'MSH'</span><span class="p">)[</span><span class="mi">9</span><span class="p">]</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">ctl</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Two choices matter. The record names the patient by resource id, not name or
+MRN, because the audit log is sensitive too (who read which oncology charts says a
+lot). And the audit write sits inside the same <code class="language-plaintext highlighter-rouge">try</code> as the FHIR write:
+if we can't record it, we don't send AA, and the sender retries. The write is
+idempotent, so retrying is safe; an unaudited write is not.</p>
+
+<p>Download the week-5 <a href="static/files/week-5/bridge.py">bridge.py</a>,
+the read tool <a href="static/files/week-5/chart.py">chart.py</a>, and the samples
+from week 3 (<a href="static/files/week-3/adt.hl7">adt.hl7</a>,
+<a href="static/files/week-3/adt-on.hl7">adt-on.hl7</a>,
+<a href="static/files/week-3/adt-amp.hl7">adt-amp.hl7</a>). With the bridge
+running (we start it in the <a href="#phi-canary-test">canary section</a> below),
+we send two more admissions. The bridge's log shows every write so far,
+including two copies of Jane Doe's admission that went through the network
+tunnels in the <a href="#transport-security">transport section</a>:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>adt-on.hl7<span class="w"> </span>adt-amp.hl7<span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span><span class="nv">$f</span><span class="w"> </span>-p<span class="w"> </span><span class="m">2575</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA<span class="p">;</span><span class="w"> </span><span class="k">done</span>
+<span class="go">MSA|AA|MSG00006</span>
+<span class="go">MSA|AA|MSG00005</span>
+<span class="gp">$ </span>cat<span class="w"> </span>bridge.log
+<span class="go">listening for MLLP on port 2575</span>
+<span class="go">MSG00001 AA after HTTP 201 http://localhost:8080/fhir/Patient/1000/_history/1</span>
+<span class="go">MSG00001 AA after HTTP 200 http://localhost:8080/fhir/Patient/1000/_history/1</span>
+<span class="go">MSG00006 AA after HTTP 201 http://localhost:8080/fhir/Patient/1001/_history/1</span>
+<span class="go">MSG00005 AA after HTTP 201 http://localhost:8080/fhir/Patient/1002/_history/1</span>
+</code></pre></div></div>
+
+<p>Now some people read charts. <code class="language-plaintext highlighter-rouge">chart.py</code> stands in for an EHR
+screen: it fetches a patient as a named user, records why, and audits the read
+before it shows anything:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>dr.lee<span class="w"> </span>Patient/1000<span class="w"> </span>treatment
+<span class="go">Patient/1000 DOE JANE 1980-02-14</span>
+<span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>nurse.ng<span class="w"> </span>Patient/1000<span class="w"> </span>treatment
+<span class="go">Patient/1000 DOE JANE 1980-02-14</span>
+<span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>dr.lee<span class="w"> </span>Patient/1001<span class="w"> </span>treatment
+<span class="go">Patient/1001 TREMBLAY LUC 1980-02-14</span>
+<span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>it.sam<span class="w"> </span>Patient/1001<span class="w"> </span>testing
+<span class="go">Patient/1001 TREMBLAY LUC 1980-02-14</span>
+<span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>it.sam<span class="w"> </span>Patient/1002<span class="w"> </span>testing
+<span class="go">Patient/1002 DOE&amp;SMITH JANE 1980-02-14</span>
+<span class="gp">$ </span>python3<span class="w"> </span>chart.py<span class="w"> </span>it.sam<span class="w"> </span>Patient/1000<span class="w"> </span>testing
+<span class="go">Patient/1000 DOE JANE 1980-02-14</span>
+<span class="gp">$ </span>wc<span class="w"> </span>-l<span class="w"> </span>audit.jsonl
+<span class="go">10 audit.jsonl</span>
+</code></pre></div></div>
+
+<p>The audit log can now answer the question from the “Done when” list.
+<code class="language-plaintext highlighter-rouge">jq</code> handles JSON lines directly, one object per line:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>head<span class="w"> </span>-n<span class="w"> </span><span class="m">1</span><span class="w"> </span>audit.jsonl<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+<span class="go">{</span>
+<span class="go">  "when": "2026-10-31T22:13:09+00:00",</span>
+<span class="go">  "who": "svc-adt-bridge",</span>
+<span class="go">  "action": "create",</span>
+<span class="go">  "patient": "Patient/1000",</span>
+<span class="go">  "why": "ADT^A01^ADT_A01 MSG00001"</span>
+<span class="go">}</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'select(.patient == "Patient/1001") | [.when, .who, .action, .why] | @tsv'</span><span class="w"> </span>audit.jsonl
+<span class="go">2026-10-31T22:13:09+00:00	svc-adt-bridge	create	ADT^A01^ADT_A01 MSG00006</span>
+<span class="go">2026-10-31T22:13:10+00:00	dr.lee	read	treatment</span>
+<span class="go">2026-10-31T22:13:10+00:00	it.sam	read	testing</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-s<span class="w"> </span>-r<span class="w"> </span><span class="s1">'map(select(.action == "read")) | group_by(.who)[] | "\(length) \(.[0].who)"'</span><span class="w"> </span>audit.jsonl
+<span class="go">2 dr.lee</span>
+<span class="go">3 it.sam</span>
+<span class="go">1 nurse.ng</span>
+<span class="gp">$ </span>jq<span class="w"> </span>-r<span class="w"> </span>--arg<span class="w"> </span>u<span class="w"> </span>it.sam<span class="w"> </span><span class="s1">'select(.who == $u) | "\(.patient) \(.why)"'</span><span class="w"> </span>audit.jsonl
+<span class="go">Patient/1001 testing</span>
+<span class="go">Patient/1002 testing</span>
+<span class="go">Patient/1000 testing</span>
+</code></pre></div></div>
+
+<p>The first query is what a privacy officer runs when Luc Tremblay asks who
+looked at his record: the bridge created it, Dr. Lee read it for treatment, and
+<code class="language-plaintext highlighter-rouge">it.sam</code> read it for “testing”. The others show the pattern: someone in
+IT with valid production access reading three real charts. That's what snooping
+often looks like in a log. The audit log doesn't prevent the read; it makes it
+findable, and people behave differently when they know reads are reviewed.</p>
+
+<p>In production, ship audit records off the box as they're written, to a store
+the application can append to but not edit, and audit reads of the audit log too.
+We didn't build that here; the JSON-lines file is the shape, not the storage.</p>
+
+<h1 id="leak-paths">Leak paths</h1>
+
+<p>Leak paths: logs, git history, tickets, screenshots, crash dumps, AI prompts.
+None of them is a database, so none of them is protected like one, and each is
+copied, retained and shared by default. Here is how each one happens and what
+stops it:</p>
+
+<div class="table-wrap">
+<table><thead><tr><th>Leak path</th><th>How PHI gets there</th><th>What stops it</th></tr></thead><tbody>
+<tr><td>Logs</td><td>A debug line prints the message; an exception message includes a field value; a server logs query strings</td><td>Log control IDs and resource ids only; canary test in CI; treat every log store as PHI</td></tr>
+<tr><td>Git history</td><td>A sample message, export or log committed “just to reproduce the bug”</td><td>Synthetic fixtures only; review diffs; report, then purge history</td></tr>
+<tr><td>Tickets</td><td>The failing message or a log excerpt pasted into the ticket or chat</td><td>Reference the control ID or resource id; attach synthetic repros</td></tr>
+<tr><td>Screenshots</td><td>A chart, a worklist or an integration engine's message browser in the corner of a picture</td><td>Synthetic test environment for demos; crop or redact before sharing</td></tr>
+<tr><td>Crash dumps</td><td>Core dumps, heap dumps and error-reporting services capture memory and local variables, which hold whole messages</td><td>Dumps stay inside the trust boundary; scrub or disable variable capture</td></tr>
+<tr><td>AI prompts</td><td>A log, ticket or screenshot pasted into a chat to ask for help</td><td>Approved tools, synthetic data, an AGENTS.md the tools read</td></tr>
+</tbody></table>
+</div>
+
+<h2 id="structured-logs">Structured logs</h2>
+
+<p>Structured logs with MSH-10 and resource ids, never names or MRNs. The bridge
+log above has a control ID, an ACK code and a resource URL per line: enough to
+trace a message end to end, through the FHIR server where access is controlled
+and audited, and nothing about the patient.</p>
+
+<h2 id="phi-canary-test">The PHI canary test</h2>
+
+<p>“Never log PHI” is a policy, and policies decay one debug line at a time, so
+we make it a test. PHI canary test: fake identifiers in test messages; CI fails if
+any reach the logs. Ours drives the bridge's <code class="language-plaintext highlighter-rouge">process()</code> with the
+canary message along every path (accepted, missing MRN, bad birth date, unknown
+authority, production ID, FHIR down) and searches everything logged at
+<code class="language-plaintext highlighter-rouge">DEBUG</code>, plus the audit file:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">GOOD</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"canary.hl7"</span><span class="p">,</span> <span class="n">newline</span><span class="o">=</span><span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+<span class="n">CASES</span> <span class="o">=</span> <span class="p">{</span>  <span class="c1"># one message per path through process()</span>
+    <span class="s2">"accepted"</span><span class="p">:</span> <span class="n">GOOD</span><span class="p">,</span>
+    <span class="s2">"no-mrn"</span><span class="p">:</span> <span class="n">GOOD</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"987650^^^GENHOSP^MR"</span><span class="p">,</span> <span class="s2">""</span><span class="p">),</span>
+    <span class="s2">"bad-dob"</span><span class="p">:</span> <span class="n">GOOD</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"19610704"</span><span class="p">,</span> <span class="s2">"1961070X"</span><span class="p">),</span>
+    <span class="s2">"unknown-authority"</span><span class="p">:</span> <span class="n">GOOD</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"GENHOSP^MR"</span><span class="p">,</span> <span class="s2">"OTHER^MR"</span><span class="p">),</span>
+    <span class="s2">"production"</span><span class="p">:</span> <span class="n">GOOD</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"|T|2.5.1"</span><span class="p">,</span> <span class="s2">"|P|2.5.1"</span><span class="p">),</span>
+    <span class="s2">"fhir-down"</span><span class="p">:</span> <span class="n">GOOD</span><span class="p">,</span>
+<span class="p">}</span>
+
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">parametrize</span><span class="p">(</span><span class="s2">"case"</span><span class="p">,</span> <span class="n">CASES</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_no_canary_in_logs</span><span class="p">(</span><span class="n">case</span><span class="p">,</span> <span class="n">caplog</span><span class="p">,</span> <span class="n">monkeypatch</span><span class="p">,</span> <span class="n">tmp_path</span><span class="p">):</span>
+    <span class="n">caplog</span><span class="o">.</span><span class="n">set_level</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>  <span class="c1"># incidents turn debug on</span>
+    <span class="n">audit_file</span> <span class="o">=</span> <span class="n">tmp_path</span> <span class="o">/</span> <span class="s2">"audit.jsonl"</span>
+    <span class="n">monkeypatch</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">bridge</span><span class="p">,</span> <span class="s2">"AUDIT"</span><span class="p">,</span> <span class="n">audit_file</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">case</span> <span class="o">==</span> <span class="s2">"fhir-down"</span><span class="p">:</span>  <span class="c1"># nothing listens on port 9</span>
+        <span class="n">monkeypatch</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">bridge</span><span class="p">,</span> <span class="s2">"FHIR"</span><span class="p">,</span> <span class="s2">"http://localhost:9/fhir"</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">monkeypatch</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">bridge</span><span class="p">,</span> <span class="s2">"upsert"</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="p">(</span>
+            <span class="mi">201</span><span class="p">,</span> <span class="s2">"http://fhir.example.org/fhir/Patient/1/_history/1"</span><span class="p">))</span>
+    <span class="n">bridge</span><span class="o">.</span><span class="n">process</span><span class="p">(</span><span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">CASES</span><span class="p">[</span><span class="n">case</span><span class="p">]))</span>
+    <span class="n">logged</span> <span class="o">=</span> <span class="n">caplog</span><span class="o">.</span><span class="n">text</span>
+    <span class="k">if</span> <span class="n">audit_file</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>  <span class="c1"># the audit log is a log too</span>
+        <span class="n">logged</span> <span class="o">+=</span> <span class="n">audit_file</span><span class="o">.</span><span class="n">read_text</span><span class="p">()</span>
+    <span class="n">leaked</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">CANARIES</span> <span class="k">if</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">logged</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">leaked</span><span class="p">:</span>
+        <span class="n">pytest</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">leaked</span><span class="p">)</span><span class="si">}</span><span class="s2"> canaries in logs, first </span><span class="si">{</span><span class="n">leaked</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The FHIR write is replaced by a stub, so the test needs no server and runs in
+any CI job; the “FHIR down” case points the bridge at a port where nothing listens,
+so the real exception text goes through the real logging code. The list of
+canaries and <a href="static/files/week-5/pytest.ini">pytest.ini</a> are shared
+with the redaction tests below. Download
+<a href="static/files/week-5/test_canary_logs.py">test_canary_logs.py</a> and
+<a href="static/files/week-5/canary.hl7">canary.hl7</a>.</p>
+
+<p>Start the lab first: the FHIR server, then the bridge in the background with
+its log in a file:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>hapi<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:8080<span class="w"> </span>hapiproject/hapi:latest
+<span class="go">a6c1614f4850014a564374435c90c7aba5693c37936a8d45f61973beb65210cd</span>
+<span class="gp">$ </span>timeout<span class="w"> </span><span class="m">120</span><span class="w"> </span>bash<span class="w"> </span>-c<span class="w"> </span><span class="s1">'until curl -sf -o /dev/null localhost:8080/fhir/metadata; do sleep 5; done'</span>
+<span class="gp">$ </span>python3<span class="w"> </span>bridge.py<span class="w"> </span>&gt;<span class="w"> </span>bridge.log<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="gp">$ </span>sleep<span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span>cat<span class="w"> </span>bridge.log
+<span class="go">listening for MLLP on port 2575</span>
+</code></pre></div></div>
+
+<p>Now the test, first against the bridge as it is, then after a
+<a href="static/files/week-5/debug.patch">well-meant patch</a> that someone might
+add at 2 a.m. while chasing an incident:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>pytest<span class="w"> </span>test_canary_logs.py
+<span class="go">......                                                                   [100%]</span>
+<span class="go">6 passed in 0.04s</span>
+<span class="gp">$ </span>cat<span class="w"> </span>debug.patch
+<span class="go">--- bridge.py</span>
+<span class="go">+++ bridge.py</span>
+<span class="go">@@ -108,6 +108,7 @@</span>
+<span class="go"> </span>
+<span class="go"> def process(msg):</span>
+<span class="go">     ctl = field(msg, "MSH.F10")</span>
+<span class="go">+    log.debug("%s received %r", ctl, str(msg))  # for INC-1234</span>
+<span class="go">     try:</span>
+<span class="go">         status, location = upsert(to_patient(msg))</span>
+<span class="gp">         # </span>an<span class="w"> </span>audit<span class="w"> </span>failure<span class="w"> </span>is<span class="w"> </span>an<span class="w"> </span>OSError<span class="w"> </span>too:<span class="w"> </span>no<span class="w"> </span>ACK,<span class="w"> </span>so<span class="w"> </span>it<span class="w"> </span>retries
+<span class="gp">$ </span>patch<span class="w"> </span>bridge.py<span class="w"> </span>debug.patch
+<span class="go">patching file bridge.py</span>
+<span class="gp">$ </span>pytest<span class="w"> </span>--tb<span class="o">=</span>no<span class="w"> </span>-rf<span class="w"> </span>test_canary_logs.py
+<span class="go">FFFFFF                                                                   [100%]</span>
+<span class="go">=========================== short test summary info ============================</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[accepted] - Failed: 10 canaries in logs, first 987650</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[no-mrn] - Failed: 9 canaries in logs, first ZZCANARY</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[bad-dob] - Failed: 9 canaries in logs, first 987650</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[unknown-authority] - Failed: 10 canaries in logs, first 987650</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[production] - Failed: 10 canaries in logs, first 987650</span>
+<span class="go">FAILED test_canary_logs.py::test_no_canary_in_logs[fhir-down] - Failed: 10 canaries in logs, first 987650</span>
+<span class="go">6 failed in 0.04s</span>
+<span class="gp">$ </span>patch<span class="w"> </span>-R<span class="w"> </span>bridge.py<span class="w"> </span>debug.patch
+<span class="go">patching file bridge.py</span>
+</code></pre></div></div>
+
+<p>Six paths, six passes; one innocent <code class="language-plaintext highlighter-rouge">log.debug</code>, six failures. The
+failure message itself prints a canary into the CI log, which is fine because
+it's fake, and is why canaries must never be real data. The test runs at
+<code class="language-plaintext highlighter-rouge">DEBUG</code> because someone will turn debug on during an incident, exactly
+when logs get copied into tickets.</p>
+
+<h2 id="logs-you-dont-write">Logs you don't write</h2>
+
+<p>Our bridge passes its canary test. Is the system clean? Ask every component
+the data passes through. We grep the bridge's log and the audit log for names and
+MRNs, and then the FHIR server's log:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>grep<span class="w"> </span>-c<span class="w"> </span>-E<span class="w"> </span><span class="s1">'DOE|TREMBLAY|10023[456]'</span><span class="w"> </span>bridge.log<span class="w"> </span>audit.jsonl
+<span class="go">bridge.log:0</span>
+<span class="go">audit.jsonl:0</span>
+<span class="gp">$ </span>docker<span class="w"> </span>logs<span class="w"> </span>hapi<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-c<span class="w"> </span><span class="s1">'mrn%7C100234'</span>
+<span class="go">2</span>
+<span class="gp">$ </span>docker<span class="w"> </span>logs<span class="w"> </span>hapi<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-o<span class="w"> </span><span class="s1">'Params\[[^]]*100234\]'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-n<span class="w"> </span><span class="m">1</span>
+<span class="go">Params[?identifier=https%3A%2F%2Fgenhosp.example.org%2Fmrn%7C100234]</span>
+</code></pre></div></div>
+
+<p>Nothing in the files we write, but the FHIR server's access log holds the MRN
+of every patient we upserted: the conditional PUT puts the identifier in the query
+string, and HAPI logs every request's parameters, as many proxies and gateways do.
+Treat those logs as PHI (restricted, short retention, never pasted) or stop them
+logging parameters, and add them to what your canary test checks.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> HAPI FHIR 8.12.0's default access log
+  (<code class="language-plaintext highlighter-rouge">fhirtest.access</code>) recorded <code class="language-plaintext highlighter-rouge">Params[?identifier=…mrn%7C100234]</code>
+  for each conditional PUT. Our bridge's own log and the audit log had no names
+  or MRNs.</p>
+</blockquote>
+
+<h2 id="git-history">Git history</h2>
+
+<p>The fixture problem from the introduction, as it actually happens. A developer
+commits the failing message to reproduce a bug, a reviewer spots it, and the next
+commit deletes it:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>git<span class="w"> </span>init<span class="w"> </span>-q<span class="w"> </span>incident<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>incident
+<span class="gp">$ </span>cp<span class="w"> </span>../adt.hl7<span class="w"> </span>inc-1234-repro.hl7
+<span class="gp">$ </span>git<span class="w"> </span>add<span class="w"> </span>.<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>commit<span class="w"> </span>-qm<span class="w"> </span><span class="s1">'INC-1234: add failing message'</span>
+<span class="gp">$ </span>git<span class="w"> </span>rm<span class="w"> </span>-q<span class="w"> </span>inc-1234-repro.hl7<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>git<span class="w"> </span>commit<span class="w"> </span>-qm<span class="w"> </span><span class="s1">'Remove PHI'</span>
+<span class="gp">$ </span>ls<span class="p">;</span><span class="w"> </span>git<span class="w"> </span>grep<span class="w"> </span>-c<span class="w"> </span>JANE
+<span class="gp">$ </span>git<span class="w"> </span>log<span class="w"> </span>--oneline
+<span class="go">cd6549b Remove PHI</span>
+<span class="go">691fc11 INC-1234: add failing message</span>
+<span class="gp">$ </span>git<span class="w"> </span>log<span class="w"> </span>-S<span class="w"> </span><span class="s1">'DOE^JANE'</span><span class="w"> </span>--oneline
+<span class="go">cd6549b Remove PHI</span>
+<span class="go">691fc11 INC-1234: add failing message</span>
+<span class="gp">$ </span>git<span class="w"> </span>show<span class="w"> </span>HEAD~1:inc-1234-repro.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>PID
+<span class="go">PID|1||100234^^^GENHOSP^MR||DOE^JANE||19800214|F|||12 MAIN ST^^SPRINGFIELD^IL^62701</span>
+</code></pre></div></div>
+
+<p>The file is gone from the working tree, and <code class="language-plaintext highlighter-rouge">git grep</code> on the
+current commit finds nothing. But <code class="language-plaintext highlighter-rouge">git log -S</code> (the “pickaxe”) finds
+both commits that touched the string, and <code class="language-plaintext highlighter-rouge">git show</code> prints the
+patient from history. Anyone who cloned or forked in between has a copy, and so
+does every CI cache and backup of the repo.</p>
+
+<p>The order matters: <strong>report first, then purge</strong>. Rewriting
+history (with <a href="https://github.com/newren/git-filter-repo">git
+filter-repo</a>, plus the host's own cleanup, as in
+<a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository">GitHub's guide</a>)
+destroys the evidence of what was exposed, for how long and to whom, which the
+privacy office needs to judge whether it's a reportable breach. We didn't run a
+purge here.</p>
+
+<h1 id="transport-security">MLLP on the wire</h1>
+
+<p>Transport security: MLLP is plaintext, so run it over TLS or a VPN. Week 3
+watched the MLLP bytes go by; this time we look at what an eavesdropper on the
+network sees. <code class="language-plaintext highlighter-rouge">socat -v</code> sits between the sender and the bridge and
+writes everything that passes to a file:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>socat<span class="w"> </span>-v<span class="w"> </span>TCP-LISTEN:2576,reuseaddr<span class="w"> </span>TCP:localhost:2575<span class="w"> </span><span class="m">2</span>&gt;<span class="w"> </span>wire.txt<span class="w"> </span><span class="p">&amp;</span>
+<span class="gp">$ </span>sleep<span class="w"> </span><span class="m">0</span>.5<span class="p">;</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2576</span><span class="w"> </span>localhost<span class="w"> </span>&gt;<span class="w"> </span>/dev/null
+<span class="gp">$ </span>grep<span class="w"> </span>-a<span class="w"> </span>-o<span class="w"> </span><span class="s1">'PID|[^\]*'</span><span class="w"> </span>wire.txt
+<span class="go">PID|1||100234^^^GENHOSP^MR||DOE^JANE||19800214|F|||12 MAIN ST^^SPRINGFIELD^IL^62701</span>
+</code></pre></div></div>
+
+<p>The whole <code class="language-plaintext highlighter-rouge">PID</code> segment, name, MRN, birth date and address, in
+clear text, for anyone who can see the network: a compromised switch, a
+mirrored port, a misconfigured cloud network. HIPAA's Security Rule lists
+<a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.312">transmission security</a>
+among its technical safeguards; for v2 that means a VPN between sites or TLS
+around the connection.</p>
+
+<p>Now the same message through a TLS tunnel. One <code class="language-plaintext highlighter-rouge">socat</code> on the
+sending side wraps the connection in TLS, one on the receiving side unwraps it,
+and a third in the middle plays the network and dumps the bytes in hex:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>openssl<span class="w"> </span>req<span class="w"> </span>-x509<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span>-nodes<span class="w"> </span>-days<span class="w"> </span><span class="m">1</span><span class="w"> </span>-subj<span class="w"> </span>/CN<span class="o">=</span>localhost<span class="w"> </span>-addext<span class="w"> </span><span class="nv">subjectAltName</span><span class="o">=</span>DNS:localhost<span class="w"> </span>-keyout<span class="w"> </span>lab.key<span class="w"> </span>-out<span class="w"> </span>lab.crt<span class="w"> </span><span class="m">2</span>&gt;<span class="w"> </span>/dev/null
+<span class="gp">$ </span>cat<span class="w"> </span>lab.key<span class="w"> </span>lab.crt<span class="w"> </span>&gt;<span class="w"> </span>lab.pem
+<span class="gp">$ </span>socat<span class="w"> </span>OPENSSL-LISTEN:2577,reuseaddr,cert<span class="o">=</span>lab.pem,verify<span class="o">=</span><span class="m">0</span><span class="w"> </span>TCP:localhost:2575<span class="w"> </span><span class="p">&amp;</span><span class="w">  </span><span class="c1"># receiving site</span>
+<span class="gp">$ </span>socat<span class="w"> </span>-x<span class="w"> </span>TCP-LISTEN:2578,reuseaddr<span class="w"> </span>TCP:localhost:2577<span class="w"> </span><span class="m">2</span>&gt;<span class="w"> </span>tls.txt<span class="w"> </span><span class="p">&amp;</span><span class="w">  </span><span class="c1"># the network</span>
+<span class="gp">$ </span>socat<span class="w"> </span>TCP-LISTEN:2579,reuseaddr<span class="w"> </span>OPENSSL:localhost:2578,cafile<span class="o">=</span>lab.crt<span class="w"> </span><span class="m">2</span>&gt;<span class="w"> </span>/dev/null<span class="w"> </span><span class="p">&amp;</span><span class="w">  </span><span class="c1"># sending site</span>
+<span class="gp">$ </span>sleep<span class="w"> </span><span class="m">0</span>.5<span class="p">;</span><span class="w"> </span>mllp_send<span class="w"> </span>--loose<span class="w"> </span>-f<span class="w"> </span>adt.hl7<span class="w"> </span>-p<span class="w"> </span><span class="m">2579</span><span class="w"> </span>localhost<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>MSA
+<span class="go">MSA|AA|MSG00001</span>
+<span class="gp">$ </span>grep<span class="w"> </span>-a<span class="w"> </span>-c<span class="w"> </span>JANE<span class="w"> </span>tls.txt
+<span class="go">0</span>
+<span class="gp">$ </span>sed<span class="w"> </span>-n<span class="w"> </span>2p<span class="w"> </span>tls.txt<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-c1-48
+<span class="go"> 16 03 01 01 99 01 00 01 95 03 03 f1 47 6c 3d 1d</span>
+</code></pre></div></div>
+
+<p>The ACK came back, and the bytes in the middle contain no <code class="language-plaintext highlighter-rouge">JANE</code>:
+the first record starts <code class="language-plaintext highlighter-rouge">16 03 01</code>, a TLS handshake. In production use
+the engine's built-in TLS, stunnel or a site-to-site VPN, and require a client
+certificate too (our receiver accepts anyone, <code class="language-plaintext highlighter-rouge">verify=0</code>), so only the
+known sender can connect. Write the choice in the interface spec.</p>
+
+<h1 id="redaction">Redaction: allowlist, not blocklist</h1>
+
+<p>Sometimes data must leave the hospital in reduced form: to a vendor
+debugging an interface, to an analytics team, to a test environment. The
+v3.6 build list asks for allowlist redaction: keep set ID, a salted MRN
+pseudonym, birth year and sex. Here is the logic as tested in v3.6 (python-hl7):</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">KEEP</span> <span class="o">=</span> <span class="p">{</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">8</span><span class="p">}</span>  <span class="c1"># set ID, MRN, birth date, sex</span>
+<span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">msg</span><span class="o">.</span><span class="n">segment</span><span class="p">(</span><span class="s2">"PID"</span><span class="p">))):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">KEEP</span><span class="p">:</span>
+        <span class="n">msg</span><span class="p">[</span><span class="sa">f</span><span class="s2">"PID.F</span><span class="si">{</span><span class="n">n</span><span class="si">}</span><span class="s2">"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">""</span>
+<span class="n">mrn</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">msg</span><span class="p">[</span><span class="s2">"PID.F3.R1.C1"</span><span class="p">])</span>
+<span class="n">msg</span><span class="p">[</span><span class="s2">"PID.F3.R1.C1"</span><span class="p">]</span> <span class="o">=</span> <span class="n">pseudonym</span><span class="p">(</span><span class="n">mrn</span><span class="p">)</span>  <span class="c1"># salted SHA-256</span>
+<span class="n">msg</span><span class="p">[</span><span class="s2">"PID.F7"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">msg</span><span class="p">[</span><span class="s2">"PID.F7"</span><span class="p">])[:</span><span class="mi">4</span><span class="p">]</span>  <span class="c1"># birth year</span>
+</code></pre></div></div>
+
+<p>It names what to <em>keep</em> and blanks everything else. The tempting
+alternative is a blocklist naming what to <em>remove</em>. Both are in
+<a href="static/files/week-5/redact.py">redact.py</a>, and the first session on
+this page already showed the difference: the blocklist output still ends with
+<code class="language-plaintext highlighter-rouge">D5550142^IL^20300101</code>, the driver's licence number in
+<code class="language-plaintext highlighter-rouge">PID-20</code>. <a href="static/files/week-5/test_redact.py">test_redact.py</a>
+runs every canary message through both:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">CANARIES</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"987650"</span><span class="p">,</span> <span class="s2">"ZZCANARY"</span><span class="p">,</span> <span class="s2">"TWEETY"</span><span class="p">,</span> <span class="s2">"ZZMAIDEN"</span><span class="p">,</span> <span class="s2">"19610704"</span><span class="p">,</span>
+            <span class="s2">"CANARY LANE"</span><span class="p">,</span> <span class="s2">"555-0142"</span><span class="p">,</span> <span class="s2">"A5550142"</span><span class="p">,</span> <span class="s2">"999-55-0142"</span><span class="p">,</span>
+            <span class="s2">"D5550142"</span><span class="p">,</span> <span class="s2">"9990001425"</span><span class="p">]</span>
+
+
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">parametrize</span><span class="p">(</span><span class="s2">"path"</span><span class="p">,</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">glob</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">"canary*.hl7"</span><span class="p">)))</span>
+<span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">parametrize</span><span class="p">(</span><span class="s2">"how"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"allowlist"</span><span class="p">,</span> <span class="s2">"blocklist"</span><span class="p">])</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_no_canary_survives</span><span class="p">(</span><span class="n">how</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">monkeypatch</span><span class="p">):</span>
+    <span class="n">monkeypatch</span><span class="o">.</span><span class="n">setenv</span><span class="p">(</span><span class="s2">"PSEUDONYM_KEY"</span><span class="p">,</span> <span class="s2">"test-key-not-a-secret"</span><span class="p">)</span>
+    <span class="n">msg</span> <span class="o">=</span> <span class="n">hl7</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">newline</span><span class="o">=</span><span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+    <span class="n">out</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="n">redact</span><span class="p">,</span> <span class="n">how</span><span class="p">)(</span><span class="n">msg</span><span class="p">))</span>
+    <span class="n">leaked</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">CANARIES</span> <span class="k">if</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">out</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">leaked</span><span class="p">:</span>
+        <span class="n">pytest</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">leaked</span><span class="si">}</span><span class="s2"> survived </span><span class="si">{</span><span class="n">how</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>pytest<span class="w"> </span>--tb<span class="o">=</span>no<span class="w"> </span>-rf<span class="w"> </span>test_redact.py
+<span class="go">.F                                                                       [100%]</span>
+<span class="go">=========================== short test summary info ============================</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[blocklist-canary.hl7] - Failed: canary.hl7: ['D5550142'] survived blocklist</span>
+<span class="go">1 failed, 1 passed in 0.01s</span>
+</code></pre></div></div>
+
+<p>Blocklists: they miss the fields you didn't think of. <code class="language-plaintext highlighter-rouge">PID</code> has
+dozens of fields in 2.5.1, senders put things in unexpected places, and Z-segments
+can carry anything. An allowlist fails safe: a field you forgot is a field you
+dropped, and someone will ask for it, which is a much better failure than a
+breach.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> an allowlist redaction passed; a blocklist version
+  leaked a driver's licence number (PID-20) and the canary caught it.</p>
+</blockquote>
+
+<h2 id="repeating-fields">Repeating fields</h2>
+
+<p>Our allowlist works field by field, and keeps <code class="language-plaintext highlighter-rouge">PID-3</code> whole. In
+week 3 we met an Ontario feed whose <code class="language-plaintext highlighter-rouge">PID-3</code> repeats: the MRN, then the
+provincial health card number, typed <code class="language-plaintext highlighter-rouge">JHN</code>. Add a canary like that and
+run the tests again:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>sed<span class="w"> </span><span class="s1">'s/GENHOSP^MR/GENHOSP^MR~9990001425^^^ON^JHN/'</span><span class="w"> </span>canary.hl7<span class="w"> </span>&gt;<span class="w"> </span>canary-on.hl7
+<span class="gp">$ </span>tr<span class="w"> </span><span class="s1">'\r'</span><span class="w"> </span><span class="s1">'\n'</span><span class="w"> </span>&lt;<span class="w"> </span>canary-on.hl7<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>PID<span class="w"> </span><span class="p">|</span><span class="w"> </span>cut<span class="w"> </span>-d<span class="s1">'|'</span><span class="w"> </span>-f1-4
+<span class="go">PID|1||987650^^^GENHOSP^MR~9990001425^^^ON^JHN</span>
+<span class="gp">$ </span>pytest<span class="w"> </span>--tb<span class="o">=</span>no<span class="w"> </span>-rf<span class="w"> </span>test_redact.py
+<span class="go">F.FF                                                                     [100%]</span>
+<span class="go">=========================== short test summary info ============================</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[allowlist-canary-on.hl7] - Failed: canary-on.hl7: ['9990001425'] survived allowlist</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[blocklist-canary-on.hl7] - Failed: canary-on.hl7: ['D5550142', '9990001425'] survived blocklist</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[blocklist-canary.hl7] - Failed: canary.hl7: ['D5550142'] survived blocklist</span>
+<span class="go">3 failed, 1 passed in 0.01s</span>
+</code></pre></div></div>
+
+<p>The allowlist leaked the health card number: it pseudonymized the first
+repetition and kept the second untouched. An allowlist at field level is only as
+good as your idea of what a field contains. The fix keeps only the first
+repetition (<a href="static/files/week-5/repeats.patch">repeats.patch</a>):</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span>cat<span class="w"> </span>repeats.patch
+<span class="go">--- redact.py</span>
+<span class="go">+++ redact.py</span>
+<span class="go">@@ -23,6 +23,7 @@</span>
+<span class="go">             msg[f"PID.F{n}"] = ""</span>
+<span class="go">     mrn = str(msg["PID.F3.R1.C1"])</span>
+<span class="go">     msg["PID.F3.R1.C1"] = pseudonym(mrn)  # salted SHA-256</span>
+<span class="go">+    del msg.segment("PID")[3][1:]  # first repetition only</span>
+<span class="go">     msg["PID.F7"] = str(msg["PID.F7"])[:4]  # birth year</span>
+<span class="go">     return msg</span>
+<span class="go"> </span>
+<span class="gp">$ </span>patch<span class="w"> </span>redact.py<span class="w"> </span>repeats.patch
+<span class="go">patching file redact.py</span>
+<span class="gp">$ </span>pytest<span class="w"> </span>--tb<span class="o">=</span>no<span class="w"> </span>-rf<span class="w"> </span>test_redact.py
+<span class="go">..FF                                                                     [100%]</span>
+<span class="go">=========================== short test summary info ============================</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[blocklist-canary-on.hl7] - Failed: canary-on.hl7: ['D5550142', '9990001425'] survived blocklist</span>
+<span class="go">FAILED test_redact.py::test_no_canary_survives[blocklist-canary.hl7] - Failed: canary.hl7: ['D5550142'] survived blocklist</span>
+<span class="go">2 failed, 2 passed in 0.01s</span>
+</code></pre></div></div>
+
+<p>The allowlist passes both canaries again; the blocklist still leaks, as it
+should, because nothing in it changed. The lesson is the one the canary is for:
+you don't find these by reading code, you find them by putting a distinctive fake
+value into every place a real one could be and checking that it never comes
+out.</p>
+
+<blockquote>
+  <p><strong>Tested:</strong> the v3.6 allowlist logic kept a second
+  <code class="language-plaintext highlighter-rouge">PID-3</code> repetition (an Ontario health card number) and the canary
+  caught it; deleting repetitions after the first fixed it.</p>
+</blockquote>
+
+<h2 id="pseudonyms-need-a-secret">Pseudonyms need a secret</h2>
+
+<p>The redacted message keeps a pseudonym in place of the MRN, so that
+records from the same patient can still be linked. The obvious way to make one is
+to hash the MRN. Hashing MRNs without a secret salt: anyone can hash candidates
+and match. MRNs at our hospital have six digits, so there are a million
+candidates, and <a href="static/files/week-5/crack.py">crack.py</a> tries them
+all:</p>
+
+<div class="language-console highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gp">$ </span><span class="nb">printf</span><span class="w"> </span><span class="m">100234</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sha256sum
+<span class="go">4bfcc4d35d88fbc17a18388d85ad2c6fc407db7c4214b53c306af0f366529b06  -</span>
+<span class="gp">$ </span><span class="nb">time</span><span class="w"> </span>python3<span class="w"> </span>crack.py<span class="w"> </span>4bfcc4d35d88fbc1
+<span class="go">MRN 100234</span>
+
+<span class="go">real	0m0.056s</span>
+<span class="go">user	0m0.053s</span>
+<span class="go">sys	0m0.003s</span>
+<span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">PSEUDONYM_KEY</span><span class="o">=</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span>
+<span class="gp">$ </span><span class="nv">p</span><span class="o">=</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import redact; print(redact.pseudonym("100234"))'</span><span class="k">)</span>
+<span class="gp">$ </span><span class="nb">echo</span><span class="w"> </span><span class="nv">$p</span>
+<span class="go">d3fdb263de229958</span>
+<span class="gp">$ </span><span class="nb">time</span><span class="w"> </span>python3<span class="w"> </span>crack.py<span class="w"> </span><span class="nv">$p</span>
+<span class="go">no match in 1,000,000 candidates</span>
+
+<span class="go">real	0m0.486s</span>
+<span class="go">user	0m0.482s</span>
+<span class="go">sys	0m0.004s</span>
+</code></pre></div></div>
+
+<p>The unsalted SHA-256 of MRN 100234 fell in 57 milliseconds (the search starts
+at 000000), and the whole space took under half a second. Health card numbers,
+phone numbers and birth dates are small spaces too. The fix is a keyed hash, HMAC
+(<a href="https://www.rfc-editor.org/rfc/rfc2104">RFC 2104</a>), with a random
+256-bit key; without the key the same search finds nothing:</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span><span class="w"> </span><span class="nf">pseudonym</span><span class="p">(</span><span class="n">mrn</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Keyed hash (HMAC-SHA-256): same MRN, same pseudonym."""</span>
+    <span class="n">key</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">"PSEUDONYM_KEY"</span><span class="p">]</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>  <span class="c1"># never in git</span>
+    <span class="k">return</span> <span class="n">hmac</span><span class="o">.</span><span class="n">new</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">mrn</span><span class="o">.</span><span class="n">encode</span><span class="p">(),</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()[:</span><span class="mi">16</span><span class="p">]</span>
+</code></pre></div></div>
+
+<p>The same MRN gives the same pseudonym under the same key, so linking still
+works. But anyone holding the key can reverse every pseudonym just as fast, so it
+belongs in a secrets manager, never in the repo, a ticket or a prompt. The v3.6
+comment says <em>salted</em> SHA-256; the “salt” must be a secret key, and HMAC is
+the standard way to key a hash.</p>
+
+<h1 id="de-identification">De-identification</h1>
+
+<p>Redacted or pseudonymized data is still PHI, as long as someone (you,
+holding the key) can link it back. <em>De-identified</em> data is no longer PHI
+under HIPAA, and
+<a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-E/section-164.514">45 CFR 164.514</a>
+gives two ways to get there.</p>
+
+<p>De-identification: HIPAA Safe Harbor's 18 identifiers vs. expert
+determination; free text is hardest. <strong>Safe Harbor</strong> means
+removing all 18 listed identifiers, of the individual and of relatives,
+employers or household members, and having no actual knowledge that what's left
+could identify someone. The list: names; geographic subdivisions smaller than a
+state (street, city, county, ZIP code, with an exception for the first three ZIP
+digits of areas over 20,000 people); all elements of dates except the year, and
+all ages over 89; telephone numbers; fax numbers; email addresses; social security
+numbers; medical record numbers; health plan beneficiary numbers; account numbers;
+certificate and licence numbers; vehicle identifiers including licence plates;
+device identifiers and serial numbers; URLs; IP addresses; biometric identifiers
+such as finger and voice prints; full-face photographs and comparable images; and
+any other unique identifying number, characteristic or code.</p>
+
+<p>Compare our allowlist output. Birth year is allowed (except for ages over 89),
+and sex is. The pseudonym is the problem: §164.514(c) allows a re-identification
+code only if it is “not derived from or related to information about the
+individual”, and ours is derived from the MRN. Read literally, our feed is
+pseudonymized PHI, not Safe Harbor data; a random code with a lookup table would
+qualify. Ask your privacy office, not the code reviewer.</p>
+
+<p><strong>Expert determination</strong> is the other route: a qualified expert
+shows, with documented statistical methods, that the re-identification risk is very
+small. HHS's
+<a href="https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html">de-identification guidance</a>
+explains both routes. Canadian acts use their own definitions.</p>
+
+<p>Free text is hardest: notes, <code class="language-plaintext highlighter-rouge">NTE</code> comments and text
+<code class="language-plaintext highlighter-rouge">OBX</code> results have no fields to blank. “Seen with her daughter Maria,
+who works at the pharmacy on King St” holds a relative, an employer and a place.
+Drop free text from extracts unless the purpose truly needs it.</p>
+
+<h1 id="breach-duties">Breach duties</h1>
+
+<p>What do you do the moment PHI shows up in a log? Stop copying it (not into the
+ticket that reports it either), tell your privacy or security contact where it is
+and since when, preserve what they need, then fix and clean up. Whether it's a
+breach is their call, under deadlines, so the clock starts when <em>you</em>
+notice.</p>
+
+<p>Breach duties: HIPAA notification; under PHIPA, patients and sometimes
+Ontario's privacy commissioner. Under HIPAA's
+<a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-D">breach notification rule</a>,
+a covered entity notifies each affected individual without unreasonable delay and
+no later than 60 calendar days after discovering a breach of unsecured PHI. A
+breach affecting 500 or more people is also reported to HHS at the same time (and
+to prominent media when more than 500 residents of a state are affected); smaller
+breaches are logged and reported to HHS within 60 days after the end of the
+calendar year. A breach counts as discovered on the first day it is known, or
+would have been known with reasonable diligence, which is why “I noticed it on
+Friday but wanted to check first” is a problem. Ontario's
+<a href="https://www.ontario.ca/laws/statute/04p03">PHIPA</a> requires notifying the
+affected patients, and in some circumstances the
+<a href="https://www.ipc.on.ca/">Information and Privacy Commissioner</a> as
+well; other provinces have their own rules.</p>
+
+<p>Regulation moves, too. HIPAA's Security Rule overhaul (proposed 2025) isn't
+final: the
+<a href="https://www.federalregister.gov/documents/2025/01/06/2024-30983/hipaa-security-rule-to-strengthen-the-cybersecurity-of-electronic-protected-health-information">proposed rule</a>
+was published in January 2025. Build to the current rule, and read what changed
+before you quote either.</p>
+
+<h1 id="ai-tools">AI tools</h1>
+
+<p>AI prompts are the newest leak path: whatever you paste is sent to a service,
+may be stored there, and stays in your chat history. Pasting a failing message into
+an unapproved assistant is a disclosure. “Approved” means your organization has a
+contract covering health data (in the US, usually a business associate agreement)
+and has configured the tool; your personal account is not approved.</p>
+
+<p>Coding agents add a twist: they read your repo, run your tests and see your
+logs on their own. So write the rules where they will read them: an AGENTS.md with PHI rules for
+AI coding tools. Many agents look for an <a href="https://agents.md/">AGENTS.md</a>
+file at the root of the repository; here is
+<a href="static/files/week-5/AGENTS.md">ours</a>:</p>
+
+<div class="language-markdown highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="gh"># Rules for AI coding tools in this repo</span>
+
+This repo moves patient data. These rules apply to every AI tool
+and every person using one.
+
+<span class="gu">## Data</span>
+<span class="k">-</span><span class="w"> </span>Use approved tools only (see the team wiki). No personal accounts.
+<span class="k">-</span><span class="w"> </span>Synthetic data only: Synthea output, the canary messages in this
+  repo, or hand-made samples with example.org identifier systems.
+<span class="k">-</span><span class="w"> </span>Never paste logs, tickets, screenshots, crash dumps or database
+  rows into a prompt, even "just one line". Describe the problem.
+<span class="k">-</span><span class="w"> </span>Do not open or read files under <span class="sb">`data/`</span>, <span class="sb">`exports/`</span> or <span class="sb">`*.log`</span>.
+
+<span class="gu">## Code</span>
+<span class="k">-</span><span class="w"> </span>Never log message bodies, names, birth dates, MRNs, health card
+  numbers or addresses. Log MSH-10 control IDs and resource ids.
+<span class="k">-</span><span class="w"> </span>Redaction is allowlist-only: name the fields you keep.
+<span class="k">-</span><span class="w"> </span>Pseudonyms use HMAC with <span class="sb">`PSEUDONYM_KEY`</span> from the environment.
+  Never hard-code the key, print it, or commit it.
+<span class="k">-</span><span class="w"> </span>Any change to logging, redaction or error handling must keep
+  <span class="sb">`pytest test_redact.py test_canary_logs.py`</span> passing.
+
+<span class="gu">## If you see PHI</span>
+Stop. Do not copy it anywhere, including into the prompt.
+Tell the privacy contact, then follow the incident runbook.
+</code></pre></div></div>
+
+<p>It says what data the tool may see, which files it must not open, what code
+must never log, and which tests guard that. It doesn't replace the controls: a
+model can ignore an instruction file, which is why the canary tests run in CI
+anyway.</p>
+
+<blockquote>
+  <p><strong>AI this week:</strong> approved tools and synthetic data only; never
+  paste logs, tickets or screenshots.</p>
+</blockquote>
+
+<h1 id="done-when">Done when</h1>
+
+<ul>
+  <li>CI fails if a canary reaches the logs.</li>
+  <li>The audit log answers “who touched patient X, and when?”</li>
+</ul>
+
+<h1 id="exercises">Exercises</h1>
+
+<ol>
+  <li>Why does a blocklist fail where an allowlist works? Add a
+  <code class="language-plaintext highlighter-rouge">ZPI</code> segment with a canary value to <code class="language-plaintext highlighter-rouge">canary.hl7</code> and
+  run both redactors. What should a redactor do with segments it doesn't
+  know?</li>
+  <li>Why must an MRN pseudonym use a secret salt? Change
+  <code class="language-plaintext highlighter-rouge">crack.py</code> to attack HMAC pseudonyms when the key is known, and time
+  it. What does that tell you about where the key may live?</li>
+  <li>What do you do the moment PHI shows up in a log? Write the first five steps
+  as a runbook for your team, including who you tell and what you must not
+  copy.</li>
+  <li>Make the canary test fail in three different ways besides
+  <code class="language-plaintext highlighter-rouge">debug.patch</code>: an exception message that includes a field value, a
+  log line that prints the FHIR Patient, and an f-string in the
+  <code class="language-plaintext highlighter-rouge">Reject</code> reason. Did the test catch all three?</li>
+  <li>Extend the canary test to check the FHIR server's log as well (start HAPI
+  in CI, send the canary, grep <code class="language-plaintext highlighter-rouge">docker logs</code>). Then make it pass,
+  either by changing what the server logs or by changing how the bridge finds the
+  patient. Which did you choose, and why?</li>
+  <li>Add reads to the audit trail properly: give <code class="language-plaintext highlighter-rouge">chart.py</code> a
+  required reason from a fixed list, and write a <code class="language-plaintext highlighter-rouge">jq</code> query that
+  lists every read by a user who never read that patient for
+  <code class="language-plaintext highlighter-rouge">treatment</code> before. What would a real system compare reads
+  against?</li>
+  <li>Our allowlist assumes the MRN is the first repetition of
+  <code class="language-plaintext highlighter-rouge">PID-3</code>. Make it pick the repetition whose type is <code class="language-plaintext highlighter-rouge">MR</code>
+  and whose assigning authority is <code class="language-plaintext highlighter-rouge">GENHOSP</code>, and add a canary
+  message where the health card number comes first.</li>
+  <li>Write ten short synthetic clinical notes in the style of a discharge
+  summary, then try to de-identify them with regular expressions for names,
+  dates and places. Count what you
+  missed by reading the result. What does that say about free text?</li>
+  <li>Canada track: the Ontario sample carries a health card number. Look up
+  whether your province's act treats the health card number specially, and
+  write the rule your interface spec should state about
+  logging and storing it.</li>
+</ol>
+
+<h1 id="read">Read</h1>
+
+<ul>
+  <li><a href="https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html">HHS de-identification guidance</a></li>
+  <li><a href="https://www.ipc.on.ca/">Ontario IPC</a></li>
+  <li><a href="https://fnigc.ca/ocap-training/">OCAP®</a></li>
+  <li><a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-E/section-164.514">45 CFR 164.514: de-identification (Safe Harbor list, re-identification codes)</a></li>
+  <li><a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-E/section-164.502">45 CFR 164.502: uses and disclosures, including minimum necessary</a></li>
+  <li><a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-C/section-164.312">45 CFR 164.312: technical safeguards (audit controls, transmission security)</a></li>
+  <li><a href="https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164/subpart-D">45 CFR 164 Subpart D: breach notification</a></li>
+  <li><a href="https://www.federalregister.gov/documents/2025/01/06/2024-30983/hipaa-security-rule-to-strengthen-the-cybersecurity-of-electronic-protected-health-information">Proposed HIPAA Security Rule update (Federal Register, 6 Jan 2025)</a></li>
+  <li><a href="https://www.ontario.ca/laws/statute/04p03">Ontario PHIPA (e-Laws)</a></li>
+  <li><a href="https://www.alberta.ca/health-information-act">Alberta Health Information Act</a></li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc2104">RFC 2104: HMAC</a></li>
+  <li><a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository">GitHub: removing sensitive data from a repository</a></li>
+  <li><a href="https://agents.md/">AGENTS.md</a></li>
+</ul>
+
+<hr>
+
+<div class="small center">
+<p>Course content © 2026 HeyItWorked. All rights reserved.</p>
+<p>Site design adapted from <a href="https://missing.csail.mit.edu/">The Missing Semester of Your CS Education</a> under <a href="https://creativecommons.org/licenses/by-nc-sa/4.0">CC BY-NC-SA 4.0</a>. See the <a href="license.html">license</a>.</p>
+</div>
+
+    </div>
+
+  </body>
+
+</html>

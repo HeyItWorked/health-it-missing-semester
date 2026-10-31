@@ -1,0 +1,9 @@
+{
+  "resourceType": "Patient",
+  "identifier": [
+    {"system": "http://example.org/mrn", "value": "100235"}
+  ],
+  "name": [{"family": "Kata", "given": ["Test"]}],
+  "telecom": [{"system": "phone", "value": "555-0100", "use": "home"}],
+  "birthDate": "1980-02-14"
+}
