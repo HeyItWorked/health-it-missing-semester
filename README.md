@@ -1,6 +1,6 @@
 <div align="center">
 
-# Health IT Missing Semester
+# Health IT Semester
 
 **The semester your CS degree skipped, for health tech.**
 
@@ -21,7 +21,7 @@ for new grads joining healthcare IT in the US and Canada.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/preview-dark.png">
-  <img src=".github/assets/preview-light.png" width="800" alt="The course home page: the navigation bar, the title The Missing Semester of Your Health IT Education, and the course introduction">
+  <img src=".github/assets/preview-light.png" width="800" alt="The course home page: the navigation bar, the title Health IT Semester, and the course introduction">
 </picture>
 
 </div>
